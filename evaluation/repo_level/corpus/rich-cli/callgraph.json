@@ -1,0 +1,110 @@
+{
+  "rich_cli.markdown": [
+    "rich_cli.markdown.CodeBlock"
+  ],
+  "rich-cli.main.run": [
+    "rich-cli.main.main"
+  ],
+  "rich-cli.main.render_csv": [
+    "rich-cli.main.read_resource",
+    "rich-cli.main.on_error",
+    "<builtin>.str",
+    "<builtin>.iter",
+    "<builtin>.enumerate",
+    "<builtin>.next"
+  ],
+  "rich_cli.pager.PagerApp.on_load": [],
+  "rich-cli.main.render_ipynb": [
+    "rich_cli.markdown",
+    "<str>.splitlines",
+    "<builtin>.isinstance",
+    "<builtin>.len",
+    "<str>.rstrip",
+    "rich-cli.main.read_resource",
+    "rich-cli.main._line_range"
+  ],
+  "rich-cli.main.RichCommand.format_help": [
+    "rich-cli.main.RichCommand.format_help.OptionHighlighter",
+    "rich-cli.main.blend_text",
+    "<builtin>.reversed",
+    "<builtin>.len"
+  ],
+  "rich_cli.markdown.CodeBlock.create": [
+    "rich_cli.markdown.CodeBlock.__init__"
+  ],
+  "rich-cli.main.main": [
+    "rich-cli.main.render_csv",
+    "rich_cli.markdown",
+    "rich-cli.main.ForceWidth.__init__",
+    "<str>.upper",
+    "<str>.splitlines",
+    "<builtin>.getattr",
+    "rich-cli.main.read_resource",
+    "<builtin>.int",
+    "rich-cli.main._line_range",
+    "<builtin>.eval",
+    "<str>.split",
+    "rich-cli.main.render_ipynb",
+    "rich-cli.main.on_error",
+    "<builtin>.tuple",
+    "<builtin>.bool",
+    "rich_cli.pager",
+    "<builtin>.len",
+    "rich_cli.pager.PagerRenderable.__init__",
+    "rich-cli.main.main.print_usage",
+    "rich_cli.markdown.Markdown.__init__"
+  ],
+  "rich_cli.pager.PagerApp.on_mount": [],
+  "rich-cli.main.on_error": [
+    "<builtin>.str"
+  ],
+  "rich_cli.pager.PagerApp.__init__": [
+    "<builtin>.super"
+  ],
+  "rich_cli.markdown.CodeBlock.__rich_console__": [
+    "<builtin>.str"
+  ],
+  "rich-cli.main": [
+    "<str>.join",
+    "rich-cli.main.ForceWidth.__init__",
+    "rich-cli.main.RichCommand",
+    "rich-cli.main.ForceWidth",
+    "rich-cli.main.RichCommand.__init__",
+    "rich-cli.main.run",
+    "<builtin>.sorted"
+  ],
+  "rich-cli.main.read_resource": [
+    "<map>.get",
+    "rich-cli.main.on_error",
+    "<builtin>.open"
+  ],
+  "rich-cli.main.blend_text": [
+    "<builtin>.range",
+    "<builtin>.len",
+    "<builtin>.int"
+  ],
+  "rich-cli.main.main.print_usage": [],
+  "rich_cli.pager.PagerRenderable.__init__": [
+    "<builtin>.list"
+  ],
+  "<str>.join": [],
+  "rich-cli.main.ForceWidth": [],
+  "rich_cli.markdown.CodeBlock": [
+    "<builtin>.classmethod"
+  ],
+  "rich_cli.pager.PagerApp.on_key": [],
+  "<str>.startswith": [],
+  "rich_cli.pager": [
+    "rich_cli.pager.PagerApp",
+    "rich_cli.pager.PagerRenderable"
+  ],
+  "<str>.lower": [],
+  "rich-cli.main._line_range": [
+    "rich-cli.main.on_error"
+  ],
+  "<str>.split": [],
+  "rich-cli.main.RichCommand": [],
+  "<str>.rstrip": [],
+  "rich-cli.main.ForceWidth.__init__": [],
+  "<str>.endswith": []
+}

@@ -16,7 +16,7 @@ import json
 import math
 import signal
 import statistics
-import threading
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -358,7 +358,7 @@ def _resolve_entry_file(
             candidate = root / str(mf_entry)
             if candidate.is_file():
                 return candidate
-    for fallback in ("main.py", "__init__.py", "source.py"):
+    for fallback in ("main.py", "__init__.py", "source.py", f"{root.name}.py"):
         candidate = root / fallback
         if candidate.is_file():
             return candidate
@@ -479,13 +479,56 @@ def _run_builtin_engine(
         )
 
 
-def _constraint_runner(source: str, source_path: Path) -> Dict[str, Iterable[str]]:
-    return extract_call_graph_constraint(
-        source,
-        source_path=str(source_path),
-        allow_fixture_graph_loading=False,
-    ).get()
+    try:
+        # Some corpora (e.g. bpytop.py) have module-level argparse that
+        # consumes sys.argv.  Save/restore to prevent PyCG's import hooks
+        # from seeing our extra flags.
+        saved_argv = sys.argv
+        try:
+            sys.argv = [str(project.entry_file)]
+            for _ in range(max(1, repeats)):
+                sys.argv = [str(project.entry_file)]
+                start = time.perf_counter()
+                graph = extract_call_graph_pycg(
+                    source,
+                    source_path=str(project.entry_file),
+                    use_fixture_fallback=False,
+                )
+                elapsed = (time.perf_counter() - start) * 1000.0
+                runtimes.append(elapsed)
+                normalized_graph = _normalize_graph_for_project(graph.get(), project.name)
+                predicted_edges = _adjacency_to_edges(normalized_graph)
+                # predicted_edges = _adjacency_to_edges(graph.get())
 
+            precision, recall, tp, fp, fn = _score(
+                predicted_edges, _adjacency_to_edges(project.ground_truth)
+            )
+            if dump_missing:
+                _dump_missing_edges(predicted_edges, project, "pycg", dump_missing)
+            return EngineResult(
+                engine="pycg",
+                project=project.name,
+                runtime_ms=statistics.mean(runtimes),
+                precision=precision,
+                recall=recall,
+                tp=tp,
+                fp=fp,
+                fn=fn,
+            )
+        finally:
+            sys.argv = saved_argv
+    except Exception as exc:
+        return EngineResult(
+            engine="pycg",
+            project=project.name,
+            runtime_ms=float("nan"),
+            precision=0.0,
+            recall=0.0,
+            tp=0,
+            fp=0,
+            fn=0,
+            error=str(exc),
+        )
 
 def _pycg_runner(source: str, source_path: Path) -> Dict[str, Iterable[str]]:
     return extract_call_graph_pycg(
@@ -589,8 +632,12 @@ def _aggregate(
         }
     return summary
 
-
-def _print_summary(results: Sequence[EngineResult]) -> None:
+def _print_summary(
+    results: Sequence[EngineResult],
+    exclude_zero_recall: bool = False,
+) -> None:
+    if exclude_zero_recall:
+        results = [r for r in results if not r.error and r.recall > 0.0]
     summary = _aggregate(results)
     if not summary:
         print("No results to display.")
@@ -804,6 +851,12 @@ def main() -> int:
         action="append",
         help="Limit to specific project names (repeat for multiple).",
     )
+    parser.add_argument(
+        "--exclude-zero-recall",
+        action="store_true",
+        default=False,
+        help="Exclude engine-project pairs where recall==0 from display and aggregates.",
+    )
     args = parser.parse_args()
 
     engines = args.engine or (
@@ -873,7 +926,7 @@ def main() -> int:
         )
         results.extend(ext_results)
 
-    _print_summary(results)
+    _print_summary(results, exclude_zero_recall=args.exclude_zero_recall)
 
     _write_results(args.output_json, results)
 
@@ -913,11 +966,16 @@ def _dump_project_graphs(project: Project, dump_dir: Path) -> None:
 
     if PYCG_AVAILABLE:
         try:
-            cg = extract_call_graph_pycg(
-                source,
-                source_path=str(project.entry_file),
-                use_fixture_fallback=False,
-            )
+            saved_argv = sys.argv
+            sys.argv = [str(project.entry_file)]
+            try:
+                cg = extract_call_graph_pycg(
+                    source,
+                    source_path=str(project.entry_file),
+                    use_fixture_fallback=False,
+                )
+            finally:
+                sys.argv = saved_argv
             normalized_graph = _normalize_graph_for_project(cg.get(), project.name)
             _write_callgraph_json(normalized_graph, out_dir / "pycg.json")
         except Exception:

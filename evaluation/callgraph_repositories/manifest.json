@@ -24,6 +24,42 @@
       "name": "web_framework",
       "path": "corpus/web_framework",
       "python_files": 10
+    },
+    {
+      "name": "bpytop",
+      "path": "corpus/bpytop",
+      "python_files": 5,
+      "_entry_file": "bpytop.py"
+    },
+    {
+      "name": "furl",
+      "path": "corpus/furl",
+      "python_files": 9,
+      "_entry_file": "furl/__init__.py"
+    },
+    {
+      "name": "rich-cli",
+      "path": "corpus/rich-cli",
+      "python_files": 4,
+      "_entry_file": "src/rich_cli/main.py"
+    },
+    {
+      "name": "sqlparse",
+      "path": "corpus/sqlparse",
+      "python_files": 36,
+      "_entry_file": "sqlparse/__init__.py"
+    },
+    {
+      "name": "sshtunnel",
+      "path": "corpus/sshtunnel",
+      "python_files": 7,
+      "_entry_file": "sshtunnel.py"
+    },
+    {
+      "name": "TextRank4ZH",
+      "path": "corpus/TextRank4ZH",
+      "python_files": 14,
+      "_entry_file": "textrank4zh/__init__.py"
     }
   ],
   "version": 1

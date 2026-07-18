@@ -1,0 +1,142 @@
+{
+  "<string>": [],
+  "TextRank4ZH.textrank4zh": [
+    "TextRank4ZH.textrank4zh.TextRank4Keyword",
+    "TextRank4ZH.textrank4zh.TextRank4Sentence",
+    "TextRank4ZH.textrank4zh.util",
+    "TextRank4ZH.textrank4zh.Segmentation"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation": [
+    "TextRank4ZH.textrank4zh.Segmentation.SentenceSegmentation",
+    "TextRank4ZH.textrank4zh.Segmentation.Segmentation",
+    "TextRank4ZH.textrank4zh.Segmentation.WordSegmentation",
+    "TextRank4ZH.textrank4zh.util"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation.Segmentation.__init__": [
+    "TextRank4ZH.textrank4zh.Segmentation.SentenceSegmentation.__init__",
+    "TextRank4ZH.textrank4zh.Segmentation.WordSegmentation.__init__"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation.Segmentation.segment": [
+    "TextRank4ZH.textrank4zh.util.AttrDict.__init__",
+    "TextRank4ZH.textrank4zh.util.as_text",
+    "TextRank4ZH.textrank4zh.Segmentation.SentenceSegmentation.segment",
+    "TextRank4ZH.textrank4zh.Segmentation.WordSegmentation.segment_sentences"
+  ],
+  "TextRank4ZH.textrank4zh.util.as_text": [
+    "<builtin>.ValueError",
+    "<builtin>.isinstance",
+    "<builtin>.type"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation.SentenceSegmentation.__init__": [
+    "TextRank4ZH.textrank4zh.util.as_text",
+    "<builtin>.set"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation.SentenceSegmentation.segment": [
+    "TextRank4ZH.textrank4zh.util.as_text",
+    "<builtin>.len",
+    "TextRank4ZH.textrank4zh.util.debug"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation.WordSegmentation.__init__": [
+    "TextRank4ZH.textrank4zh.util.as_text",
+    "TextRank4ZH.textrank4zh.Segmentation.get_default_stop_words_file",
+    "<builtin>.type",
+    "<builtin>.set"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation.WordSegmentation.segment": [
+    "TextRank4ZH.textrank4zh.util.as_text",
+    "<builtin>.len"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation.WordSegmentation.segment_sentences": [
+    "<list>.append",
+    "TextRank4ZH.textrank4zh.Segmentation.WordSegmentation.segment"
+  ],
+  "TextRank4ZH.textrank4zh.Segmentation.get_default_stop_words_file": [],
+  "TextRank4ZH.textrank4zh.TextRank4Keyword": [
+    "TextRank4ZH.textrank4zh.TextRank4Keyword.TextRank4Keyword",
+    "TextRank4ZH.textrank4zh.util",
+    "TextRank4ZH.textrank4zh.Segmentation"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Keyword.TextRank4Keyword.__init__": [
+    "TextRank4ZH.textrank4zh.Segmentation.Segmentation.__init__"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Keyword.TextRank4Keyword.analyze": [
+    "TextRank4ZH.textrank4zh.util.sort_words",
+    "TextRank4ZH.textrank4zh.util.debug",
+    "TextRank4ZH.textrank4zh.Segmentation.Segmentation.segment"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Keyword.TextRank4Keyword.get_keyphrases": [
+    "<list>.append",
+    "<builtin>.len",
+    "TextRank4ZH.textrank4zh.TextRank4Keyword.TextRank4Keyword.get_keywords",
+    "<str>.count",
+    "<builtin>.set"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Sentence.TextRank4Sentence.get_key_sentences": [
+    "<list>.append",
+    "<builtin>.len"
+  ],
+  "TextRank4ZH.textrank4zh.util.is_text": [
+    "<builtin>.isinstance"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Keyword.TextRank4Keyword.get_keywords": [
+    "<list>.append",
+    "<builtin>.len"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Sentence": [
+    "TextRank4ZH.textrank4zh.TextRank4Sentence.TextRank4Sentence",
+    "TextRank4ZH.textrank4zh.util",
+    "TextRank4ZH.textrank4zh.Segmentation"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Sentence.TextRank4Sentence.__init__": [
+    "TextRank4ZH.textrank4zh.Segmentation.Segmentation.__init__"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Sentence.TextRank4Sentence.analyze": [
+    "TextRank4ZH.textrank4zh.util.sort_sentences",
+    "TextRank4ZH.textrank4zh.Segmentation.Segmentation.segment"
+  ],
+  "TextRank4ZH.textrank4zh.util": [
+    "TextRank4ZH.textrank4zh.util.AttrDict"
+  ],
+  "TextRank4ZH.textrank4zh.util.debug": [
+    "<builtin>.print",
+    "<builtin>.str",
+    "<str>.join"
+  ],
+  "TextRank4ZH.textrank4zh.util.get_similarity": [
+    "<builtin>.abs",
+    "<builtin>.list",
+    "<builtin>.len",
+    "<builtin>.float",
+    "<builtin>.set",
+    "<builtin>.sum"
+  ],
+  "TextRank4ZH.textrank4zh.util.sort_sentences": [
+    "TextRank4ZH.textrank4zh.util.AttrDict.__init__",
+    "<list>.append",
+    "<builtin>.sorted",
+    "<builtin>.len",
+    "TextRank4ZH.textrank4zh.util.get_similarity",
+    "TextRank4ZH.textrank4zh.util.<lambda>"
+  ],
+  "TextRank4ZH.textrank4zh.util.AttrDict.__init__": [
+    "<builtin>.super"
+  ],
+  "TextRank4ZH.textrank4zh.util.sort_words": [
+    "TextRank4ZH.textrank4zh.util.AttrDict.__init__",
+    "TextRank4ZH.textrank4zh.util.combine",
+    "<builtin>.sorted",
+    "<list>.append",
+    "TextRank4ZH.textrank4zh.util.<lambda>",
+    "TextRank4ZH.textrank4zh.util.debug"
+  ],
+  "TextRank4ZH.textrank4zh.util.combine": [
+    "<builtin>.zip",
+    "<builtin>.len"
+  ],
+  "TextRank4ZH.textrank4zh.TextRank4Keyword.TextRank4Keyword": [],
+  "TextRank4ZH.textrank4zh.util.AttrDict": [],
+  "TextRank4ZH.textrank4zh.Segmentation.SentenceSegmentation": [],
+  "TextRank4ZH.textrank4zh.Segmentation.WordSegmentation": [],
+  "TextRank4ZH.textrank4zh.Segmentation.Segmentation": [],
+  "TextRank4ZH.textrank4zh.TextRank4Sentence.TextRank4Sentence": []
+}

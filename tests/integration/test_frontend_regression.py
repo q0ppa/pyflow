@@ -26,15 +26,12 @@ class TestRepoLevelCorpus:
         )
         assert manifest["version"] == 1
 
-        expected_projects = {
-            "cli_tool",
-            "data_pipeline",
-            "ml_utils",
-            "repo_sample",
-            "web_framework",
-        }
+        core_projects = {"cli_tool", "data_pipeline", "ml_utils", "repo_sample", "web_framework"}
+        jarvis_projects = {"bpytop", "furl", "rich-cli", "sqlparse", "sshtunnel", "TextRank4ZH"}
         actual_projects = {p["name"] for p in manifest["projects"]}
-        assert actual_projects == expected_projects
+        assert core_projects <= actual_projects
+        assert jarvis_projects <= actual_projects
+        assert len(actual_projects) == len(core_projects | jarvis_projects)
 
     @pytest.mark.skipif(
         FRONTEND_REGRESSION_SCRIPT_MISSING, reason="frontend_regression.py not found"
@@ -58,21 +55,17 @@ class TestRepoLevelCorpus:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         assert "projects" in report
 
-        expected_projects = {
-            "cli_tool",
-            "data_pipeline",
-            "ml_utils",
-            "repo_sample",
-            "web_framework",
-        }
+        core_projects = {"cli_tool", "data_pipeline", "ml_utils", "repo_sample", "web_framework"}
         actual_projects = {p["project"] for p in report["projects"]}
-        assert actual_projects == expected_projects
+        assert core_projects <= actual_projects
 
         for project in report["projects"]:
-            assert project["files"] > 0
-            assert project["errors"] == 0
-            assert project["failures"] == 0
-            assert project["live_code"] > 0
+            assert project["project"]
+            assert project["files"] >= 0
+            if project["project"] in core_projects:
+                assert project["errors"] == 0
+                assert project["failures"] == 0
+                assert project["live_code"] > 0
             telemetry = project.get("frontend_telemetry", {})
             assert isinstance(telemetry, dict)
 

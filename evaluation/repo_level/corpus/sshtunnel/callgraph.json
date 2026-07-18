@@ -1,0 +1,299 @@
+{
+  "sshtunnel.main": [
+    "sshtunnel.main._cli_main",
+    "sshtunnel.main.BaseSSHTunnelForwarderError",
+    "sshtunnel.main.HandlerSSHTunnelForwarderError",
+    "sshtunnel.main.SSHTunnelForwarder",
+    "sshtunnel.main._ForwardServer",
+    "sshtunnel.main._ThreadingForwardServer",
+    "sshtunnel.main._StreamForwardServer",
+    "sshtunnel.main._ThreadingStreamForwardServer",
+    "sshtunnel.main.SSHTunnelForwarder.__del__",
+    "sshtunnel.main._ForwardHandler"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder": [
+    "<builtin>.property",
+    "<builtin>.staticmethod"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.__del__": [
+    "sshtunnel.main.SSHTunnelForwarder.stop",
+    "sshtunnel.main.SSHTunnelForwarder.is_active"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.__enter__": [
+    "sshtunnel.main.SSHTunnelForwarder.start",
+    "sshtunnel.main.SSHTunnelForwarder.__exit__"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.__exit__": [
+    "sshtunnel.main.SSHTunnelForwarder.stop"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.__init__": [
+    "sshtunnel.main._check_paramiko_handlers",
+    "sshtunnel.main.SSHTunnelForwarder._consolidate_auth",
+    "sshtunnel.main.SSHTunnelForwarder._consolidate_binds",
+    "sshtunnel.main.SSHTunnelForwarder._process_deprecated",
+    "sshtunnel.main.SSHTunnelForwarder._get_binds",
+    "sshtunnel.main.check_host",
+    "sshtunnel.main.check_port",
+    "<builtin>.isinstance",
+    "sshtunnel.main.create_logger",
+    "<builtin>.ValueError",
+    "sshtunnel.main.check_address",
+    "sshtunnel.main.SSHTunnelForwarder._read_ssh_config"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.__repr__": [
+    "sshtunnel.main.SSHTunnelForwarder.__str__"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.__str__": [
+    "sshtunnel.main._remove_none_values",
+    "<builtin>.any"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._check_is_started": [
+    "sshtunnel.main.HandlerSSHTunnelForwarderError.__init__",
+    "sshtunnel.main.BaseSSHTunnelForwarderError.__init__",
+    "sshtunnel.main.SSHTunnelForwarder.is_active"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._check_tunnel": [
+    "sshtunnel.main.local_address",
+    "<builtin>.isinstance",
+    "sshtunnel.main._ForwardServer.local_port",
+    "sshtunnel.main._ForwardServer.local_host",
+    "sshtunnel.main._ForwardServer.remote_address"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._connect_to_gateway": [
+    "sshtunnel.main.SSHTunnelForwarder._stop_transport",
+    "sshtunnel.main.SSHTunnelForwarder._get_transport",
+    "<builtin>.len"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._consolidate_auth": [
+    "sshtunnel.main.SSHTunnelForwarder.read_private_key_file",
+    "<builtin>.isinstance",
+    "<builtin>.ValueError",
+    "sshtunnel.main.SSHTunnelForwarder.get_keys"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._consolidate_binds": [
+    "<builtin>.range",
+    "<builtin>.ValueError",
+    "<builtin>.len",
+    "<list>.extend"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._create_tunnels": [
+    "sshtunnel.main.SSHTunnelForwarder._make_ssh_forward_server",
+    "sshtunnel.main.SSHTunnelForwarder.is_active",
+    "<builtin>.zip",
+    "sshtunnel.main.SSHTunnelForwarder._connect_to_gateway"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._get_binds": [
+    "<builtin>.isinstance",
+    "sshtunnel.main.check_addresses",
+    "<builtin>.enumerate",
+    "<builtin>.ValueError",
+    "<builtin>.len"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._get_transport": [
+    "<builtin>.isinstance",
+    "<builtin>.repr"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._make_ssh_forward_handler_class": [
+    "sshtunnel.main.SSHTunnelForwarder._make_ssh_forward_handler_class.Handler"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._make_ssh_forward_server": [
+    "sshtunnel.main.address_to_str",
+    "sshtunnel.main.SSHTunnelForwarder._make_ssh_forward_handler_class",
+    "sshtunnel.main.SSHTunnelForwarder._raise",
+    "<builtin>.isinstance",
+    "<list>.append",
+    "sshtunnel.main.SSHTunnelForwarder._make_ssh_forward_server_class",
+    "sshtunnel.main._ForwardServer.__init__"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._process_deprecated": [
+    "<builtin>.ValueError",
+    "<str>.format"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._raise": [
+    "sshtunnel.main.BaseSSHTunnelForwarderError.__init__",
+    "<builtin>.repr"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._read_ssh_config": [
+    "<builtin>.int",
+    "<builtin>.open"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._serve_forever_wrapper": [
+    "sshtunnel.main.address_to_str",
+    "sshtunnel.main._ForwardServer.local_address",
+    "sshtunnel.main._ForwardServer.remote_address"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder._stop_transport": [
+    "sshtunnel.main.SSHTunnelForwarder.is_active",
+    "sshtunnel.main.address_to_str",
+    "<builtin>.isinstance",
+    "sshtunnel.main.SSHTunnelForwarder._check_is_started",
+    "sshtunnel.main._ForwardServer.local_address",
+    "sshtunnel.main._ForwardServer.remote_address",
+    "<builtin>.repr"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.check_tunnels": [
+    "sshtunnel.main.SSHTunnelForwarder._check_tunnel"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.close": [
+    "sshtunnel.main.SSHTunnelForwarder.stop"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.get_agent_keys": [
+    "<builtin>.list",
+    "<builtin>.len"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.get_keys": [
+    "<builtin>.hasattr",
+    "sshtunnel.main.SSHTunnelForwarder.read_private_key_file",
+    "sshtunnel.main.SSHTunnelForwarder.get_agent_keys",
+    "<builtin>.len",
+    "<map>.keys"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.is_active": [],
+  "sshtunnel.main.SSHTunnelForwarder.local_bind_address": [
+    "<builtin>.len",
+    "sshtunnel.main.BaseSSHTunnelForwarderError.__init__",
+    "sshtunnel.main.SSHTunnelForwarder._check_is_started"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.local_bind_addresses": [
+    "sshtunnel.main.SSHTunnelForwarder._check_is_started"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.local_bind_host": [
+    "<builtin>.len",
+    "sshtunnel.main.BaseSSHTunnelForwarderError.__init__",
+    "sshtunnel.main.SSHTunnelForwarder._check_is_started"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.local_bind_hosts": [
+    "sshtunnel.main.SSHTunnelForwarder._check_is_started"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.local_bind_port": [
+    "<builtin>.len",
+    "sshtunnel.main.BaseSSHTunnelForwarderError.__init__",
+    "sshtunnel.main.SSHTunnelForwarder._check_is_started"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.local_bind_ports": [
+    "sshtunnel.main.SSHTunnelForwarder._check_is_started"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.local_is_up": [
+    "sshtunnel.main.check_address",
+    "sshtunnel.main.SSHTunnelForwarder.check_tunnels",
+    "<map>.get"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.read_private_key_file": [
+    "<builtin>.hasattr"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.restart": [
+    "sshtunnel.main.SSHTunnelForwarder.start",
+    "sshtunnel.main.SSHTunnelForwarder.stop"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.start": [
+    "<map>.values",
+    "sshtunnel.main.SSHTunnelForwarder.is_active",
+    "sshtunnel.main.address_to_str",
+    "sshtunnel.main.SSHTunnelForwarder._raise",
+    "sshtunnel.main.SSHTunnelForwarder.stop",
+    "sshtunnel.main._ForwardServer.local_port",
+    "<builtin>.any",
+    "sshtunnel.main.SSHTunnelForwarder._check_tunnel",
+    "sshtunnel.main.SSHTunnelForwarder._create_tunnels"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.stop": [
+    "sshtunnel.main.address_to_str",
+    "sshtunnel.main.SSHTunnelForwarder._stop_transport",
+    "<str>.join"
+  ],
+  "sshtunnel.main.SSHTunnelForwarder.tunnel_bindings": [
+    "<builtin>.dict"
+  ],
+  "sshtunnel.main._ForwardHandler._redirect": [],
+  "sshtunnel.main._ForwardHandler.handle": [
+    "sshtunnel.main._ForwardHandler._redirect",
+    "<builtin>.isinstance",
+    "sshtunnel.main.get_connection_id",
+    "sshtunnel.main.BaseSSHTunnelForwarderError.__init__",
+    "<builtin>.repr"
+  ],
+  "sshtunnel.main._ForwardServer": [
+    "<builtin>.property"
+  ],
+  "sshtunnel.main._ForwardServer.__init__": [
+    "sshtunnel.main.create_logger"
+  ],
+  "sshtunnel.main._ForwardServer.handle_error": [
+    "sshtunnel.main.remote_address"
+  ],
+  "sshtunnel.main._StreamForwardServer": [
+    "<builtin>.property"
+  ],
+  "sshtunnel.main._StreamForwardServer.__init__": [
+    "sshtunnel.main.create_logger"
+  ],
+  "sshtunnel.main._add_handler": [],
+  "sshtunnel.main._bindlist": [
+    "<builtin>.len",
+    "<builtin>.int"
+  ],
+  "sshtunnel.main._check_paramiko_handlers": [],
+  "sshtunnel.main._cli_main": [
+    "sshtunnel.main.SSHTunnelForwarder.__enter__",
+    "sshtunnel.main.open_tunnel",
+    "<builtin>.min",
+    "sshtunnel.main._parse_arguments",
+    "sshtunnel.main._remove_none_values",
+    "sshtunnel.main.SSHTunnelForwarder.__exit__"
+  ],
+  "sshtunnel.main._parse_arguments": [
+    "<builtin>.vars",
+    "<str>.format"
+  ],
+  "sshtunnel.main._remove_none_values": [
+    "<builtin>.map",
+    "<builtin>.list"
+  ],
+  "sshtunnel.main.address_to_str": [
+    "<builtin>.isinstance",
+    "<builtin>.str"
+  ],
+  "sshtunnel.main.check_address": [
+    "sshtunnel.main.check_host",
+    "sshtunnel.main.check_port",
+    "<builtin>.isinstance",
+    "<builtin>.type",
+    "<builtin>.ValueError"
+  ],
+  "sshtunnel.main.check_addresses": [
+    "<builtin>.AssertionError",
+    "<builtin>.all",
+    "<builtin>.isinstance",
+    "<builtin>.any",
+    "sshtunnel.main.check_address"
+  ],
+  "sshtunnel.main.check_host": [
+    "<builtin>.isinstance",
+    "<builtin>.type"
+  ],
+  "sshtunnel.main.check_port": [
+    "<builtin>.isinstance"
+  ],
+  "sshtunnel.main.create_logger": [
+    "sshtunnel.main._check_paramiko_handlers",
+    "<builtin>.isinstance",
+    "sshtunnel.main._add_handler",
+    "<builtin>.any"
+  ],
+  "sshtunnel.main.get_connection_id": [],
+  "sshtunnel.main.open_tunnel": [
+    "sshtunnel.main.SSHTunnelForwarder._process_deprecated",
+    "sshtunnel.main.SSHTunnelForwarder.__init__",
+    "<builtin>.isinstance",
+    "sshtunnel.main.create_logger"
+  ],
+  "sshtunnel.main._ThreadingStreamForwardServer": [],
+  "<str>.format": [],
+  "<str>.join": [],
+  "sshtunnel.main._ThreadingForwardServer": [],
+  "sshtunnel.main.HandlerSSHTunnelForwarderError": [],
+  "<builtin>.property": [],
+  "sshtunnel.main.BaseSSHTunnelForwarderError": [],
+  "sshtunnel.main._ForwardHandler": [],
+  "sshtunnel.main.BaseSSHTunnelForwarderError.__init__": []
+}
