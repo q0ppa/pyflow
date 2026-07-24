@@ -366,7 +366,7 @@ def _resolve_entry_file(
 
 
 def _normalize_graph_for_project(
-    graph: Dict[str, Iterable[str]], project_name: str
+    graph: Dict[str, Iterable[str]], project_name: str, *, strip_builtins: bool = True
 ) -> Dict[str, List[str]]:
     # print(f"Normalizing {project_name}")
     BUILTIN_PREFIXES = (
@@ -391,7 +391,7 @@ def _normalize_graph_for_project(
 
     normalized: Dict[str, List[str]] = {}
     for caller, callees in graph.items():
-        if caller.startswith("<builtin>") or caller.startswith("<"):
+        if strip_builtins and (caller.startswith("<builtin>") or caller.startswith("<")):
             continue
         if any(caller.startswith(prefix) for prefix in BUILTIN_PREFIXES):
             normalized_caller = caller
@@ -402,7 +402,7 @@ def _normalize_graph_for_project(
 
         normalized_callees = []
         for callee in callees:
-            if callee.startswith("<builtin>") or callee.startswith("<"):
+            if strip_builtins and (callee.startswith("<builtin>") or callee.startswith("<")):
                 continue
             if any(callee.startswith(prefix) for prefix in BUILTIN_PREFIXES):
                 normalized_callees.append(callee)
@@ -415,12 +415,32 @@ def _normalize_graph_for_project(
 
     return normalized
 
+def _normalize_gt(graph: Dict[str, Iterable[str]]) -> Dict[str, List[str]]:
+    """Strip <builtin> / <dynamic> / <str> / <list> / ... callees from GT.
 
-def _dump_missing_edges(
-    predicted: Set[Edge], project: Project, engine_name: str, dump_dir: Path
-) -> None:
+    Matches the same filtering that ``_normalize_graph_for_project`` applies to
+    engine output, so that GT entries for edges the engine cannot represent are
+    not counted as false negatives.
+    """
+    cleaned: Dict[str, List[str]] = {}
+    for caller, callees in graph.items():
+        kept = [c for c in callees if not (c.startswith("<") or c.startswith("<builtin>"))]
+        cleaned[caller] = kept
+    return cleaned
+
+
+def _score(predicted: Set[Edge], expected: Set[Edge]) -> Tuple[float, float, int, int, int]:
+    tp = len(predicted & expected)
+    fp = len(predicted - expected)
+    fn = len(expected - predicted)
+    precision = tp / (tp + fp) if (tp + fp) else 1.0
+    recall = tp / (tp + fn) if (tp + fn) else 1.0
+    return precision, recall, tp, fp, fn
+
+def _dump_missing_edges(predicted: Set[Edge], project: Project, engine_name: str, dump_dir: Path, normalize_gt: bool = True) -> None:
     # print(f"Dump {project.name} for {engine_name}")
-    gt_edges = _adjacency_to_edges(project.ground_truth)
+    gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
+    gt_edges = _adjacency_to_edges(gt_graph)
     missing = gt_edges - predicted
     if not missing:
         return
@@ -432,29 +452,28 @@ def _dump_missing_edges(
         missing_dict.setdefault(caller, []).append(callee)
     _write_callgraph_json(missing_dict, out_file)
 
-
-def _run_builtin_engine(
-    engine_name: str,
-    project: Project,
-    runner: Callable[[str, Path], Dict[str, Iterable[str]]],
-    repeats: int,
-    timeout_seconds: float,
-    dump_missing: Optional[Path] = None,
-) -> EngineResult:
-    """Run one built-in engine with the common timing and scoring semantics."""
-
+def _run_constraint_engine(project: Project, repeats: int, dump_missing: Optional[Path] = None, normalize_gt: bool = True) -> EngineResult:
     source = project.entry_file.read_text(encoding="utf-8")
     try:
-        timed_graph = _time_graph_runner(
-            lambda: runner(source, project.entry_file), repeats, timeout_seconds
-        )
-        normalized_graph = _normalize_graph_for_project(timed_graph.graph, project.name)
-        predicted_edges = _adjacency_to_edges(normalized_graph)
-        precision, recall, tp, fp, fn = _score_edges(
-            predicted_edges, _adjacency_to_edges(project.ground_truth)
+        for _ in range(max(1, repeats)):
+            start = time.perf_counter()
+            graph = extract_call_graph_constraint(
+                source,
+                source_path=str(project.entry_file),
+                allow_fixture_graph_loading=False,
+            )
+            elapsed = (time.perf_counter() - start) * 1000.0
+            runtimes.append(elapsed)
+            normalized_graph = _normalize_graph_for_project(graph.get(), project.name, strip_builtins=normalize_gt)
+            predicted_edges = _adjacency_to_edges(normalized_graph)
+            # predicted_edges = _adjacency_to_edges(graph.get())
+
+        gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
+        precision, recall, tp, fp, fn = _score(
+            predicted_edges, _adjacency_to_edges(gt_graph)
         )
         if dump_missing:
-            _dump_missing_edges(predicted_edges, project, engine_name, dump_missing)
+            _dump_missing_edges(predicted_edges, project, "constraint", dump_missing, normalize_gt=normalize_gt)
         return EngineResult(
             engine=engine_name,
             project=project.name,
@@ -478,6 +497,10 @@ def _run_builtin_engine(
             error=str(exc),
         )
 
+def _run_pycg_engine(project: Project, repeats: int, dump_missing: Optional[Path] = None, normalize_gt: bool = True) -> EngineResult:
+    source = project.entry_file.read_text(encoding="utf-8")
+    runtimes: List[float] = []
+    predicted_edges: Set[Edge] = set()
 
     try:
         # Some corpora (e.g. bpytop.py) have module-level argparse that
@@ -496,15 +519,16 @@ def _run_builtin_engine(
                 )
                 elapsed = (time.perf_counter() - start) * 1000.0
                 runtimes.append(elapsed)
-                normalized_graph = _normalize_graph_for_project(graph.get(), project.name)
+                normalized_graph = _normalize_graph_for_project(graph.get(), project.name, strip_builtins=normalize_gt)
                 predicted_edges = _adjacency_to_edges(normalized_graph)
                 # predicted_edges = _adjacency_to_edges(graph.get())
 
+            gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
             precision, recall, tp, fp, fn = _score(
-                predicted_edges, _adjacency_to_edges(project.ground_truth)
+                predicted_edges, _adjacency_to_edges(gt_graph)
             )
             if dump_missing:
-                _dump_missing_edges(predicted_edges, project, "pycg", dump_missing)
+                _dump_missing_edges(predicted_edges, project, "pycg", dump_missing, normalize_gt=normalize_gt)
             return EngineResult(
                 engine="pycg",
                 project=project.name,
@@ -530,17 +554,7 @@ def _run_builtin_engine(
             error=str(exc),
         )
 
-def _pycg_runner(source: str, source_path: Path) -> Dict[str, Iterable[str]]:
-    return extract_call_graph_pycg(
-        source,
-        source_path=str(source_path),
-        use_fixture_fallback=False,
-    ).get()
-
-
-def _load_external_results(
-    result_dir: Path, projects: List[Project]
-) -> List[EngineResult]:
+def _load_external_results(result_dir: Path, projects: List[Project], normalize_gt: bool = True) -> List[EngineResult]:
     results: List[EngineResult] = []
     if not result_dir.is_dir():
         return results
@@ -575,9 +589,10 @@ def _load_external_results(
             if not isinstance(proj_graph, dict):
                 continue
             try:
+                gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
                 predicted_edges = _adjacency_to_edges(proj_graph)
-                precision, recall, tp, fp, fn = _score_edges(
-                    predicted_edges, _adjacency_to_edges(project.ground_truth)
+                precision, recall, tp, fp, fn = _score(
+                    predicted_edges, _adjacency_to_edges(gt_graph)
                 )
                 results.append(
                     EngineResult(
@@ -857,6 +872,12 @@ def main() -> int:
         default=False,
         help="Exclude engine-project pairs where recall==0 from display and aggregates.",
     )
+    parser.add_argument(
+        "--no-normalize-gt",
+        action="store_true",
+        default=False,
+        help="Keep <builtin> / <str> / <list> callee edges in ground-truth (by default they are stripped to match engine output normalization).",
+    )
     args = parser.parse_args()
 
     engines = args.engine or (
@@ -891,38 +912,28 @@ def main() -> int:
             print(f"No projects matching: {args.project}")
             return 1
 
+    engines = args.engine or ["constraint", "pycg"] if PYCG_AVAILABLE else ["constraint"]
+
+    normalize_gt = not args.no_normalize_gt
+
     results: List[EngineResult] = []
     for project in projects:
         print(f"Processing {project.name} (entry: {project.entry_file.name}) ...")
         if "constraint" in engines:
             results.append(
-                _run_builtin_engine(
-                    "constraint",
-                    project,
-                    _constraint_runner,
-                    args.repeat,
-                    args.timeout,
-                    args.dump_missing,
-                )
+                _run_constraint_engine(project, repeats=args.repeat, dump_missing=args.dump_missing, normalize_gt=normalize_gt)
             )
         if "pycg" in engines and PYCG_AVAILABLE:
             results.append(
-                _run_builtin_engine(
-                    "pycg",
-                    project,
-                    _pycg_runner,
-                    args.repeat,
-                    args.timeout,
-                    args.dump_missing,
-                )
+                _run_pycg_engine(project, repeats=args.repeat, dump_missing=args.dump_missing, normalize_gt=normalize_gt)
             )
 
         if args.dump_outputs:
-            _dump_project_graphs(project, args.dump_outputs)
+            _dump_project_graphs(project, args.dump_outputs, normalize_gt=normalize_gt)
 
     if args.external_result_dir:
         ext_results = _load_external_results(
-            args.external_result_dir.resolve(), projects
+            args.external_result_dir.resolve(), projects, normalize_gt=normalize_gt
         )
         results.extend(ext_results)
 
@@ -934,21 +945,7 @@ def main() -> int:
     return 2 if failed else 0
 
 
-def _write_results(output_path: Optional[Path], results: Sequence[object]) -> None:
-    if not output_path:
-        return
-    serializable = []
-    for result in results:
-        data = result.__dict__.copy()
-        if data.get("runtime_ms", 0.0) != data.get("runtime_ms", 0.0):
-            data["runtime_ms"] = None
-        serializable.append(data)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
-    print(f"Wrote results to {output_path}")
-
-
-def _dump_project_graphs(project: Project, dump_dir: Path) -> None:
+def _dump_project_graphs(project: Project, dump_dir: Path, normalize_gt: bool = True) -> None:
     source = project.entry_file.read_text(encoding="utf-8")
     out_dir = dump_dir / project.name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -959,7 +956,7 @@ def _dump_project_graphs(project: Project, dump_dir: Path) -> None:
             source_path=str(project.entry_file),
             allow_fixture_graph_loading=False,
         )
-        normalized_graph = _normalize_graph_for_project(cg.get(), project.name)
+        normalized_graph = _normalize_graph_for_project(cg.get(), project.name, strip_builtins=normalize_gt)
         _write_callgraph_json(normalized_graph, out_dir / "constraint.json")
     except Exception:
         pass
@@ -976,12 +973,13 @@ def _dump_project_graphs(project: Project, dump_dir: Path) -> None:
                 )
             finally:
                 sys.argv = saved_argv
-            normalized_graph = _normalize_graph_for_project(cg.get(), project.name)
+            normalized_graph = _normalize_graph_for_project(cg.get(), project.name, strip_builtins=normalize_gt)
             _write_callgraph_json(normalized_graph, out_dir / "pycg.json")
         except Exception:
             pass
 
-    _write_callgraph_json(project.ground_truth, out_dir / "ground_truth.json")
+    gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
+    _write_callgraph_json(gt_graph, out_dir / "ground_truth.json")
 
 
 if __name__ == "__main__":

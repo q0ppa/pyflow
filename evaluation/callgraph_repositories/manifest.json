@@ -26,12 +26,6 @@
       "python_files": 10
     },
     {
-      "name": "bpytop",
-      "path": "corpus/bpytop",
-      "python_files": 5,
-      "_entry_file": "bpytop.py"
-    },
-    {
       "name": "furl",
       "path": "corpus/furl",
       "python_files": 9,
@@ -54,12 +48,6 @@
       "path": "corpus/sshtunnel",
       "python_files": 7,
       "_entry_file": "sshtunnel.py"
-    },
-    {
-      "name": "TextRank4ZH",
-      "path": "corpus/TextRank4ZH",
-      "python_files": 14,
-      "_entry_file": "textrank4zh/__init__.py"
     }
   ],
   "version": 1
