@@ -34,7 +34,11 @@ import sys as _sys
 _this_dir = str(Path(__file__).resolve().parent)
 if _this_dir not in _sys.path:
     _sys.path.insert(0, _this_dir)
-from bench_repo_callgraph import normalize_callgraph_name
+from bench_repo_callgraph import (
+    normalize_callgraph_name,
+    _compute_analysed_callers,
+    _normalize_gt,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -101,6 +105,7 @@ class MissingEdgeDiagnoser:
         cg, project_root: Path, *,
         project_name: str = "",
         entry_file: Optional[Path] = None,
+        whole_program: bool = False,
     ):
         self._builder = builder
         self._gt = gt
@@ -108,6 +113,7 @@ class MissingEdgeDiagnoser:
         self._project_root = project_root
         self._project_name = project_name
         self._entry_file = entry_file
+        self._whole_program = whole_program
         self._cg_edges: Set[Tuple[str, str]] = set()
         self._cg_dynamic: Set[str] = set()
 
@@ -121,6 +127,11 @@ class MissingEdgeDiagnoser:
             nc = self._norm(caller)
             nt = self._norm(callee)
             self._cg_edges.add((nc, nt))
+
+        # Use the shared definition of "analysed" from the bench module.
+        self._reachable_callers = _compute_analysed_callers(
+            cg.get(), project_name, entry_file,
+        )
 
         # Which callers have dynamic summaries (normalized)
         for caller, callees in cg.get().items():
@@ -241,13 +252,20 @@ class MissingEdgeDiagnoser:
     # ── main diagnosis ──
 
     def diagnose_all(self) -> List[EdgeDiagnosis]:
-        # Build normalized GT edge set
+        # Apply the same GT normalisation as the bench (strip <builtin> /
+        # <str> / <list> / ... callees).
         gt_edges: Set[Tuple[str, str]] = set()
-        for caller, callees in self._gt.items():
+        for caller, callees in _normalize_gt(self._gt).items():
             nc = self._norm(caller)
             for callee in callees:
                 nt = self._norm(callee)
                 gt_edges.add((nc, nt))
+
+        # DDA: suppress edges from callers PyFlow never reached
+        if not self._whole_program:
+            gt_edges = {
+                (c, t) for c, t in gt_edges if c in self._reachable_callers
+            }
 
         missing = sorted(gt_edges - self._cg_edges)
         results = []
@@ -1155,6 +1173,7 @@ def diagnose_project(
     builder: ConstraintCallGraphBuilder, cg, project_root: Path, *,
     project_name: str = "",
     entry_file: Optional[Path] = None,
+    whole_program: bool = False,
 ) -> List[EdgeDiagnosis]:
     gt_path = project_root / "callgraph.json"
     gt = _load_gt(gt_path)
@@ -1162,6 +1181,7 @@ def diagnose_project(
         builder, gt, cg, project_root,
         project_name=project_name,
         entry_file=entry_file,
+        whole_program=whole_program,
     )
     return diagnoser.diagnose_all()
 
@@ -1239,6 +1259,14 @@ def main():
                         help="-v: per-repo catalog; -vv: +3 examples each; -vvv: all edges")
     parser.add_argument("--show", action="append", default=None,
                         help="Only show verbose details for this root cause (repeatable)")
+    parser.add_argument(
+        "--whole-program",
+        action="store_true",
+        default=False,
+        help="Whole-program analysis: diagnose all ground-truth edges. "
+             "When off (default), only diagnose edges whose caller was "
+             "reached by the engine (demand-driven evaluation).",
+    )
     args = parser.parse_args()
     
     # Validate --show values
@@ -1295,10 +1323,11 @@ def main():
     all_results: List[Tuple[str, List[EdgeDiagnosis]]] = []
     out = open(args.output, "w") if args.output else sys.stdout
 
+    mode_tag = "[WPA]" if args.whole_program else "[DDA]"
     for name, proj_dir, entry_file in targets:
         YELLOW = "\033[33;1m"
         RESET = "\033[0m"
-        print(f"\n{YELLOW}{name}{RESET}", file=sys.stderr)
+        print(f"\n{YELLOW}{name}{RESET} {mode_tag}", file=sys.stderr)
         try:
             signal.signal(signal.SIGALRM, _timeout_handler)
             signal.alarm(120)
@@ -1323,6 +1352,7 @@ def main():
                 builder, cg, proj_dir,
                 project_name=name,
                 entry_file=entry_file,
+                whole_program=args.whole_program,
             )
             all_results.append((name, diagnoses))
 

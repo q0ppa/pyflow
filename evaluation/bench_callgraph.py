@@ -482,6 +482,50 @@ def _normalize_gt(graph: Dict[str, Iterable[str]]) -> Dict[str, List[str]]:
     return cleaned
 
 
+def _compute_analysed_callers(
+    raw_graph: Dict[str, Iterable[str]],
+    project_name: str,
+    entry_file: Optional[Path],
+) -> Set[str]:
+    """Return the set of *normalized* caller names that were truly analysed.
+
+    A caller is "analysed" when it produced at least one *project-internal*
+    outgoing edge — i.e. a callee that does NOT start with ``<``.  Callers
+    whose bodies only yielded ``<builtin>`` / ``<dynamic>`` edges (because
+    ``self`` was ⊤ or the receiver was lost) are excluded: their bodies
+    were never meaningfully processed.
+
+    This is the shared definition of "analysed" used by both the bench
+    runner (for DDA scoring) and the diagnosis tool (for DDA filtering).
+    """
+    analysed_raw: Set[str] = set()
+    for caller, callees in raw_graph.items():
+        if caller.startswith("<"):
+            continue
+        for callee in callees:
+            if not callee.startswith("<"):
+                analysed_raw.add(caller)
+                break
+
+    analysed: Set[str] = set()
+    for c in analysed_raw:
+        nc = normalize_callgraph_name(c, project_name, entry_file=entry_file)
+        if not nc.startswith("<"):
+            analysed.add(nc)
+    return analysed
+
+
+def _filter_gt_dda(
+    gt_graph: Dict[str, List[str]],
+    raw_graph: Dict[str, Iterable[str]],
+    project_name: str,
+    entry_file: Optional[Path],
+) -> Dict[str, List[str]]:
+    """Filter GT to only edges whose caller was truly analysed."""
+    analysed = _compute_analysed_callers(raw_graph, project_name, entry_file)
+    return {c: callees for c, callees in gt_graph.items() if c in analysed}
+
+
 def _score(predicted: Set[Edge], expected: Set[Edge]) -> Tuple[float, float, int, int, int]:
     tp = len(predicted & expected)
     fp = len(predicted - expected)
@@ -490,11 +534,23 @@ def _score(predicted: Set[Edge], expected: Set[Edge]) -> Tuple[float, float, int
     recall = tp / (tp + fn) if (tp + fn) else 1.0
     return precision, recall, tp, fp, fn
 
-def _dump_missing_edges(predicted: Set[Edge], project: Project, engine_name: str, dump_dir: Path, normalize_gt: bool = True) -> None:
-    # print(f"Dump {project.name} for {engine_name}")
+
+def _dump_missing_edges(
+    predicted_edges: Set[Edge],
+    raw_graph: Dict[str, Iterable[str]],
+    project: Project,
+    engine_name: str,
+    dump_dir: Path,
+    normalize_gt: bool = True,
+    whole_program: bool = True,
+) -> None:
     gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
+    if not whole_program:
+        gt_graph = _filter_gt_dda(
+            gt_graph, raw_graph, project.name, project.entry_file,
+        )
     gt_edges = _adjacency_to_edges(gt_graph)
-    missing = gt_edges - predicted
+    missing = gt_edges - predicted_edges
     if not missing:
         return
     out_dir = dump_dir / project.name
@@ -505,8 +561,18 @@ def _dump_missing_edges(predicted: Set[Edge], project: Project, engine_name: str
         missing_dict.setdefault(caller, []).append(callee)
     _write_callgraph_json(missing_dict, out_file)
 
-def _run_constraint_engine(project: Project, repeats: int, dump_missing: Optional[Path] = None, normalize_gt: bool = True) -> EngineResult:
+def _run_constraint_engine(
+    project: Project, repeats: int, *,
+    dump_missing: Optional[Path] = None,
+    normalize_gt: bool = True,
+    whole_program: bool = True,
+) -> EngineResult:
     source = project.entry_file.read_text(encoding="utf-8")
+    runtimes: List[float] = []
+    predicted_edges: Set[Edge] = set()
+    normalized_graph: Dict[str, List[str]] = {}
+    raw_graph: Dict[str, Iterable[str]] = {}
+
     try:
         for _ in range(max(1, repeats)):
             start = time.perf_counter()
@@ -517,19 +583,28 @@ def _run_constraint_engine(project: Project, repeats: int, dump_missing: Optiona
             )
             elapsed = (time.perf_counter() - start) * 1000.0
             runtimes.append(elapsed)
+            raw_graph = graph.get()
             normalized_graph = _normalize_graph_for_project(
-                graph.get(), project.name,
+                raw_graph, project.name,
                 strip_builtins=normalize_gt,
                 entry_file=project.entry_file,
             )
             predicted_edges = _adjacency_to_edges(normalized_graph)
 
         gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
+        if not whole_program:
+            gt_graph = _filter_gt_dda(
+                gt_graph, raw_graph, project.name, project.entry_file,
+            )
         precision, recall, tp, fp, fn = _score(
             predicted_edges, _adjacency_to_edges(gt_graph)
         )
         if dump_missing:
-            _dump_missing_edges(predicted_edges, project, "constraint", dump_missing, normalize_gt=normalize_gt)
+            _dump_missing_edges(
+                predicted_edges, raw_graph, project, "constraint",
+                dump_missing, normalize_gt=normalize_gt,
+                whole_program=whole_program,
+            )
         return EngineResult(
             engine=engine_name,
             project=project.name,
@@ -553,10 +628,17 @@ def _run_constraint_engine(project: Project, repeats: int, dump_missing: Optiona
             error=str(exc),
         )
 
-def _run_pycg_engine(project: Project, repeats: int, dump_missing: Optional[Path] = None, normalize_gt: bool = True) -> EngineResult:
+def _run_pycg_engine(
+    project: Project, repeats: int, *,
+    dump_missing: Optional[Path] = None,
+    normalize_gt: bool = True,
+    whole_program: bool = True,
+) -> EngineResult:
     source = project.entry_file.read_text(encoding="utf-8")
     runtimes: List[float] = []
     predicted_edges: Set[Edge] = set()
+    normalized_graph: Dict[str, List[str]] = {}
+    raw_graph: Dict[str, Iterable[str]] = {}
 
     try:
         # Some corpora (e.g. bpytop.py) have module-level argparse that
@@ -575,19 +657,28 @@ def _run_pycg_engine(project: Project, repeats: int, dump_missing: Optional[Path
                 )
                 elapsed = (time.perf_counter() - start) * 1000.0
                 runtimes.append(elapsed)
+                raw_graph = graph.get()
                 normalized_graph = _normalize_graph_for_project(
-                    graph.get(), project.name,
+                    raw_graph, project.name,
                     strip_builtins=normalize_gt,
                     entry_file=project.entry_file,
                 )
                 predicted_edges = _adjacency_to_edges(normalized_graph)
 
             gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
+            if not whole_program:
+                gt_graph = _filter_gt_dda(
+                    gt_graph, raw_graph, project.name, project.entry_file,
+                )
             precision, recall, tp, fp, fn = _score(
                 predicted_edges, _adjacency_to_edges(gt_graph)
             )
             if dump_missing:
-                _dump_missing_edges(predicted_edges, project, "pycg", dump_missing, normalize_gt=normalize_gt)
+                _dump_missing_edges(
+                    predicted_edges, raw_graph, project, "pycg",
+                    dump_missing, normalize_gt=normalize_gt,
+                    whole_program=whole_program,
+                )
             return EngineResult(
                 engine="pycg",
                 project=project.name,
@@ -937,6 +1028,14 @@ def main() -> int:
         default=False,
         help="Keep <builtin> / <str> / <list> callee edges in ground-truth (by default they are stripped to match engine output normalization).",
     )
+    parser.add_argument(
+        "--whole-program",
+        action="store_true",
+        default=False,
+        help="Whole-program analysis: compare against the full ground-truth. "
+             "When off (default), only compare edges whose caller was reached "
+             "by the engine (demand-driven evaluation).",
+    )
     args = parser.parse_args()
 
     engines = args.engine or (
@@ -974,17 +1073,29 @@ def main() -> int:
     engines = args.engine or ["constraint", "pycg"] if PYCG_AVAILABLE else ["constraint"]
 
     normalize_gt = not args.no_normalize_gt
+    whole_program = args.whole_program
 
     results: List[EngineResult] = []
     for project in projects:
-        print(f"Processing {project.name} (entry: {project.entry_file.name}) ...")
+        mode_tag = "[WPA]" if whole_program else "[DDA]"
+        print(f"Processing {project.name} (entry: {project.entry_file.name}) {mode_tag} ...")
         if "constraint" in engines:
             results.append(
-                _run_constraint_engine(project, repeats=args.repeat, dump_missing=args.dump_missing, normalize_gt=normalize_gt)
+                _run_constraint_engine(
+                    project, repeats=args.repeat,
+                    dump_missing=args.dump_missing,
+                    normalize_gt=normalize_gt,
+                    whole_program=whole_program,
+                )
             )
         if "pycg" in engines and PYCG_AVAILABLE:
             results.append(
-                _run_pycg_engine(project, repeats=args.repeat, dump_missing=args.dump_missing, normalize_gt=normalize_gt)
+                _run_pycg_engine(
+                    project, repeats=args.repeat,
+                    dump_missing=args.dump_missing,
+                    normalize_gt=normalize_gt,
+                    whole_program=whole_program,
+                )
             )
 
         if args.dump_outputs:
