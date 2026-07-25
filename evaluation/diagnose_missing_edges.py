@@ -589,6 +589,14 @@ class MissingEdgeDiagnoser:
 
     def _classify_attr_lookup(self, d: EdgeDiagnosis) -> str:
         """self.xxx() where self has a value but lookup produced nothing."""
+        # ── Priority: RECURSIVE > BUILTIN > ATTR ──
+        if d.caller == d.callee:
+            d.evidence.append(
+                f"self calls itself: `{d.caller}` → `{d.callee}`. "
+                "This is a recursive self-call that should have been resolved."
+            )
+            return "RECURSIVE_UNRESOLVED"
+
         d.evidence.append(
             f"self parameter values: {d.self_value_details[:5]}"
         )
@@ -632,33 +640,46 @@ class MissingEdgeDiagnoser:
         scope = self._builder.scopes.get(d.caller)
         if scope:
             import ast as ast_module
+            found_self_call = False
             for stmt in scope.body:
                 for node in ast_module.walk(stmt):
-                    if isinstance(node, ast_module.Call):
-                        # Pattern: str(x) / len(x) / iter(x) → builtin protocol gap
-                        if isinstance(node.func, ast_module.Name):
-                            if node.func.id in ('str', 'len', 'iter', 'repr', 'bool', 'int'):
-                                if callee_method == '__str__' and node.func.id == 'str':
+                    # Pattern: `x in y` → `y.__contains__(x)`
+                    if isinstance(node, ast_module.Compare):
+                        for op in node.ops:
+                            if isinstance(op, (ast_module.In, ast_module.NotIn)):
+                                if callee_method == '__contains__':
                                     d.evidence.append(
-                                        f"Call pattern is `str(x)` → GT expects edge to `x.__str__()`. "
-                                        f"This is a BUILTIN_PROTOCOL_GAP, not an attr-lookup failure."
+                                        f"Call pattern: `x in y` → GT expects `y.__contains__()`. "
+                                        "This is a BUILTIN_PROTOCOL_GAP (operator protocol)."
                                     )
                                     return "BUILTIN_PROTOCOL_GAP"
-                        # Pattern: self.method() where method == callee
-                        if isinstance(node.func, ast_module.Attribute):
-                            if node.func.attr == callee_method:
-                                if isinstance(node.func.value, ast_module.Name):
-                                    rcvr = node.func.value.id
-                                    call_str = ast_module.unparse(node)[:120]
-                                    if rcvr == 'self' and d.caller == d.callee:
-                                        d.evidence.append(
-                                            f"Call pattern: `{call_str}` — recursive self-call. "
-                                            f"May also match RECURSIVE_UNRESOLVED."
-                                        )
-                                    else:
-                                        d.evidence.append(
-                                            f"Call pattern: `{call_str}`"
-                                        )
+                    if not isinstance(node, ast_module.Call):
+                        continue
+                    # Pattern: str(x) / len(x) / iter(x) → builtin protocol gap
+                    if isinstance(node.func, ast_module.Name):
+                        if node.func.id in ('str', 'len', 'iter', 'repr', 'bool', 'int'):
+                            if callee_method == '__str__' and node.func.id == 'str':
+                                d.evidence.append(
+                                    f"Call pattern is `str(x)` → GT expects edge to `x.__str__()`. "
+                                    f"This is a BUILTIN_PROTOCOL_GAP."
+                                )
+                                return "BUILTIN_PROTOCOL_GAP"
+                    # Track self.xxx() calls
+                    if isinstance(node.func, ast_module.Attribute):
+                        if isinstance(node.func.value, ast_module.Name):
+                            if node.func.value.id == 'self' and node.func.attr == callee_method:
+                                found_self_call = True
+                                call_str = ast_module.unparse(node)[:120]
+                                d.evidence.append(f"Call pattern: `{call_str}`")
+            
+            # If callee method is never called via self.xxx(), this is NOT an attr-lookup issue
+            if not found_self_call:
+                d.evidence.append(
+                    f"Callee `{callee_method}` is NOT called via self.xxx() in the caller body. "
+                    "The receiver is a parameter, local variable, or container element — "
+                    "this is a RECEIVER_LOST issue, not an attr-lookup failure on self."
+                )
+                return "RECEIVER_LOST"
 
         d.evidence.append(
             "self has a value AND callee exists, but the edge was not produced. "
@@ -895,8 +916,14 @@ C_GREEN = "\033[32m"
 C_BLUE = "\033[34m"
 C_RESET = "\033[0m"
 
-def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int = 0,
+def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int = 1,
                  show_filter: Optional[Set[str]] = None, file=sys.stdout):
+    """Print per-project diagnostic report.
+    
+    verbose=1: catalog only (per-repo summary)
+    verbose=2: catalog + 3 examples per category + compact list (-v)
+    verbose=3: catalog + all edges with full evidence (-vv)
+    """
     by_cat: Dict[str, List[EdgeDiagnosis]] = defaultdict(list)
     for d in diagnoses:
         by_cat[d.category].append(d)
@@ -945,19 +972,24 @@ def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int
         pct = count / total * 100
         desc = ROOT_CAUSE_CATALOG.get(cat, ("", ""))[0]
         tag = _tag(cat)
-        print(f"  {tag}{cat:<42} {count:>4d} ({pct:5.1f}%)")
+        # All tags have same visible width (8 chars including trailing space).
+        # ANSI codes in tag don't affect visual positioning of subsequent chars.
+        pad = 54 - len(cat)
+        if pad < 1:
+            pad = 1
+        print(f"  {tag}{cat}{' ' * pad}{count:>4d} ({pct:5.1f}%)")
         if desc:
             print(f"       {desc}")
 
     print(f"\n  {T_FIX}={fixable_count}  {T_NAME}={infra_count}  {T_REACH}={reach_count}  other={other_count}")
 
-    if verbose == 0:
+    if verbose <= 1:
         return
 
-    if verbose >= 2:
-        print(f"\n  ── details (-vv) ──")
+    if verbose >= 3:
+        print(f"\n  ── details (-vvv) ──")
     else:
-        print(f"\n  ── details (-v, 3 examples each) ──")
+        print(f"\n  ── details (-vv) ──")
 
     for cat in sorted(by_cat, key=lambda c: len(by_cat[c]), reverse=True):
         if show_filter and cat not in show_filter:
@@ -969,7 +1001,7 @@ def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int
         if desc[1]:
             print(f"  → {desc[1]}")
 
-        show = items if verbose >= 2 else items[:3]
+        show = items if verbose >= 3 else items[:3]
         for diag in show:
             print(f"\n    ✗ {diag.caller}")
             print(f"      → {diag.callee}")
@@ -977,7 +1009,7 @@ def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int
                 for line in textwrap.wrap(ev, width=64, initial_indent="      • ", subsequent_indent="        "):
                     print(line)
 
-        if verbose < 2 and len(items) > 3:
+        if verbose < 3 and len(items) > 3:
             print(f"\n    ... and {len(items) - 3} more")
             for diag in items[3:]:
                 print(f"      {diag.caller}  →  {diag.callee}")
@@ -1029,6 +1061,49 @@ def diagnose_project(builder: ConstraintCallGraphBuilder, cg, project_root: Path
 # CLI
 # ═══════════════════════════════════════════════════════════════════════
 
+def _print_all_repo_summary(
+    all_results: List[Tuple[str, List[EdgeDiagnosis]]],
+    show_filter: Optional[Set[str]] = None,
+    file=sys.stdout,
+):
+    """Print combined overview across all repos."""
+    total = 0
+    combined: Dict[str, int] = defaultdict(int)
+    for name, diagnoses in all_results:
+        total += len(diagnoses)
+        for d in diagnoses:
+            combined[d.category] += 1
+
+    if total == 0:
+        print("No missing edges across all projects.", file=file)
+        return
+
+    print(f"\n  {total} missing edges across {len(all_results)} projects", file=file)
+
+    cat_order = sorted(combined.keys(), key=lambda c: combined[c], reverse=True)
+    for cat in cat_order:
+        count = combined[cat]
+        pct = count / total * 100
+        # Build tag: color-wrapped fixed-width label
+        if cat in FIXABLE_TIER:
+            tag = f"{C_RED}[fix]   {C_RESET}"
+        elif cat in REACHABILITY_TIER:
+            tag = f"{C_GREEN}[reach] {C_RESET}"
+        elif cat in INFRA_TIER:
+            tag = f"{C_BLUE}[name]  {C_RESET}"
+        else:
+            tag = "         "
+        pad = 54 - len(cat)
+        if pad < 1:
+            pad = 1
+        print(f"  {tag}{cat}{' ' * pad}{count:>4d} ({pct:5.1f}%)", file=file)
+
+    fix_total = sum(combined.get(c, 0) for c in FIXABLE_TIER)
+    reach_total = sum(combined.get(c, 0) for c in REACHABILITY_TIER)
+    name_total = sum(combined.get(c, 0) for c in INFRA_TIER)
+    print(f"\n  {C_RED}[fix]{C_RESET}={fix_total}  {C_BLUE}[name]{C_RESET}={name_total}  {C_GREEN}[reach]{C_RESET}={reach_total}", file=file)
+
+
 def main():
     # Build a color-coded root cause listing for help/errors
     _fix_cats = sorted([c for c in ROOT_CAUSE_CATALOG if c in FIXABLE_TIER])
@@ -1052,7 +1127,7 @@ def main():
     parser.add_argument("--project", type=str, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("-v", "--verbose", action="count", default=0,
-                        help="-v: show per-category examples; -vv: show all edges with full evidence")
+                        help="-v: per-repo catalog; -vv: +3 examples each; -vvv: all edges")
     parser.add_argument("--show", action="append", default=None,
                         help="Only show verbose details for this root cause (repeatable)")
     args = parser.parse_args()
@@ -1108,6 +1183,9 @@ def main():
     def _timeout_handler(signum, frame):
         raise TimeoutError("timeout")
 
+    # Collect all diagnoses first (for all-repo summary at default level)
+    all_results: List[Tuple[str, List[EdgeDiagnosis]]] = []
+
     for name, proj_dir, entry_file in targets:
         YELLOW = "\033[33;1m"
         RESET = "\033[0m"
@@ -1133,20 +1211,31 @@ def main():
 
             print(f"  Diagnosing missing edges ...", file=sys.stderr)
             diagnoses = diagnose_project(builder, cg, proj_dir)
-
-            out = open(args.output, "w") if args.output else sys.stdout
-            try:
-                print_report(diagnoses, name, verbose=args.verbose,
-                            show_filter=show_filter, file=out)
-            finally:
-                if args.output:
-                    out.close()
+            all_results.append((name, diagnoses))
 
         except TimeoutError:
             print(f"  [SKIP] Timed out", file=sys.stderr)
         except Exception as e:
             print(f"  [ERROR] {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+
+    if not all_results:
+        print("[ERROR] All projects failed", file=sys.stderr)
+        sys.exit(1)
+
+    out = open(args.output, "w") if args.output else sys.stdout
+    try:
+        if args.verbose == 0:
+            # Default: all-repo summary
+            _print_all_repo_summary(all_results, show_filter=show_filter, file=out)
+        else:
+            # -v/-vv/-vvv: per-repo detail
+            for name, diagnoses in all_results:
+                print_report(diagnoses, name, verbose=args.verbose,
+                            show_filter=show_filter, file=out)
+    finally:
+        if args.output:
+            out.close()
 
 
 if __name__ == "__main__":
