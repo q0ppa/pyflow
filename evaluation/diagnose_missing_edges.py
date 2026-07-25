@@ -29,6 +29,13 @@ from pyflow.analysis.callgraph.constraint_based.model import (
     GLOBAL_CONTEXT,
 )
 
+# Import normalization helper from the sibling bench module (same directory).
+import sys as _sys
+_this_dir = str(Path(__file__).resolve().parent)
+if _this_dir not in _sys.path:
+    _sys.path.insert(0, _this_dir)
+from bench_repo_callgraph import normalize_callgraph_name
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Helpers
@@ -89,45 +96,121 @@ class EdgeDiagnosis:
 # ═══════════════════════════════════════════════════════════════════════
 
 class MissingEdgeDiagnoser:
-    def __init__(self, builder: ConstraintCallGraphBuilder, gt: Dict[str, List[str]], cg, project_root: Path):
+    def __init__(
+        self, builder: ConstraintCallGraphBuilder, gt: Dict[str, List[str]],
+        cg, project_root: Path, *,
+        project_name: str = "",
+        entry_file: Optional[Path] = None,
+    ):
         self._builder = builder
         self._gt = gt
         self._cg_graph = cg
         self._project_root = project_root
+        self._project_name = project_name
+        self._entry_file = entry_file
         self._cg_edges: Set[Tuple[str, str]] = set()
         self._cg_dynamic: Set[str] = set()
 
-        # Pre-compute edges from the built graph
-        for caller, callee in cg.edges():
-            self._cg_edges.add((caller, callee))
+        # Helper to normalize a name using the same logic as the bench runner
+        self._norm = lambda n: normalize_callgraph_name(
+            n, project_name, entry_file=entry_file,
+        )
 
-        # Which callers have dynamic summaries
+        # Pre-compute edges from the built graph (normalized)
+        for caller, callee in cg.edges():
+            nc = self._norm(caller)
+            nt = self._norm(callee)
+            self._cg_edges.add((nc, nt))
+
+        # Which callers have dynamic summaries (normalized)
         for caller, callees in cg.get().items():
             if any(c.startswith("<dynamic") for c in callees):
-                self._cg_dynamic.add(caller)
+                self._cg_dynamic.add(self._norm(caller))
+
+        # Build normalized scope/function sets for existence checks,
+        # plus reverse mappings (normalized → raw) for deep inspection.
+        self._normalized_scopes: Set[str] = set()
+        self._norm_to_raw_scope: Dict[str, str] = {}
+        for s in builder.scopes:
+            ns = self._norm(s)
+            self._normalized_scopes.add(ns)
+            self._norm_to_raw_scope[ns] = s
+
+        self._normalized_functions: Set[str] = set()
+        self._norm_to_raw_func: Dict[str, str] = {}
+        for f in builder.functions:
+            nf = self._norm(f)
+            self._normalized_functions.add(nf)
+            self._norm_to_raw_func[nf] = f
+
+        # Also for classes used in MRO / hierarchy checks
+        self._norm_to_raw_class: Dict[str, str] = {}
+        for c in builder.classes:
+            nc = self._norm(c)
+            self._norm_to_raw_class[nc] = c
 
         # Build reverse index: unqualified function name → list of qualified names
+        # (uses normalized names so lookup matches GT convention)
         self._unqualified_index: Dict[str, List[str]] = defaultdict(list)
         for scope_name in builder.scopes:
-            unq = scope_name.rsplit('.', 1)[-1]
-            self._unqualified_index[unq].append(scope_name)
+            ns = self._norm(scope_name)
+            unq = ns.rsplit('.', 1)[-1]
+            self._unqualified_index[unq].append(ns)
         for func_name in builder.functions:
-            unq = func_name.rsplit('.', 1)[-1]
-            if func_name not in self._unqualified_index.get(unq, []):
-                self._unqualified_index[unq].append(func_name)
+            nf = self._norm(func_name)
+            unq = nf.rsplit('.', 1)[-1]
+            if nf not in self._unqualified_index.get(unq, []):
+                self._unqualified_index[unq].append(nf)
 
-    # ── lookup helpers ──
+    # ── lookup helpers (operate on normalized names, resolve to raw for builder) ──
+
+    def _raw_scope(self, norm_name: str) -> Optional[str]:
+        """Resolve a normalized scope name back to the raw builder key."""
+        if norm_name in self._builder.scopes:
+            return norm_name
+        return self._norm_to_raw_scope.get(norm_name)
+
+    def _raw_func(self, norm_name: str) -> Optional[str]:
+        if norm_name in self._builder.functions:
+            return norm_name
+        return self._norm_to_raw_func.get(norm_name)
+
+    def _raw_class(self, norm_name: str) -> Optional[str]:
+        if norm_name in self._builder.classes:
+            return norm_name
+        return self._norm_to_raw_class.get(norm_name)
+
+    def _raw_name(self, norm_name: str) -> str:
+        """Best-effort reverse-normalize: return the raw builder name."""
+        return (
+            self._raw_scope(norm_name)
+            or self._raw_func(norm_name)
+            or self._raw_class(norm_name)
+            or norm_name
+        )
 
     def _func_info(self, name: str):
-        return self._builder.functions.get(name)
+        raw = self._raw_func(name) or self._raw_scope(name)
+        if raw:
+            return self._builder.functions.get(raw)
+        return None
 
     def _scope_info(self, name: str):
-        return self._builder.scopes.get(name)
+        raw = self._raw_scope(name)
+        if raw:
+            return self._builder.scopes.get(raw)
+        return None
 
     def _class_info(self, name: str):
-        return self._builder.classes.get(name)
+        raw = self._raw_class(name)
+        if raw:
+            return self._builder.classes.get(raw)
+        return None
 
     def _mro(self, class_name: str) -> List[str]:
+        raw = self._raw_class(class_name)
+        if raw:
+            return self._builder._mro(raw)
         return self._builder._mro(class_name)
 
     def _scope_input(self, scope: str, param: str) -> List[str]:
@@ -143,13 +226,28 @@ class MissingEdgeDiagnoser:
                 sources.append(src)
         return sources
 
+    def _scope_exists(self, name: str) -> bool:
+        """Check if a scope exists under either raw or normalized name."""
+        if name in self._builder.scopes:
+            return True
+        return name in self._normalized_scopes
+
+    def _func_exists(self, name: str) -> bool:
+        """Check if a function exists under either raw or normalized name."""
+        if name in self._builder.functions:
+            return True
+        return name in self._normalized_functions
+
     # ── main diagnosis ──
 
     def diagnose_all(self) -> List[EdgeDiagnosis]:
+        # Build normalized GT edge set
         gt_edges: Set[Tuple[str, str]] = set()
         for caller, callees in self._gt.items():
+            nc = self._norm(caller)
             for callee in callees:
-                gt_edges.add((caller, callee))
+                nt = self._norm(callee)
+                gt_edges.add((nc, nt))
 
         missing = sorted(gt_edges - self._cg_edges)
         results = []
@@ -159,13 +257,16 @@ class MissingEdgeDiagnoser:
         return results
 
     def _diagnose_one(self, caller: str, callee: str) -> EdgeDiagnosis:
+        # Normalized names for display; raw names for builder lookups
         d = EdgeDiagnosis(caller=caller, callee=callee, category="UNKNOWN")
+        raw_caller = self._raw_name(caller)
+        raw_callee = self._raw_name(callee)
 
-        # ── Basic existence checks ──
-        d.caller_in_scopes = caller in self._builder.scopes
-        d.caller_in_functions = caller in self._builder.functions
-        d.callee_in_scopes = callee in self._builder.scopes
-        d.callee_in_functions = callee in self._builder.functions
+        # ── Basic existence checks (using normalized-aware lookup) ──
+        d.caller_in_scopes = self._scope_exists(caller)
+        d.caller_in_functions = self._func_exists(caller)
+        d.callee_in_scopes = self._scope_exists(callee)
+        d.callee_in_functions = self._func_exists(callee)
 
         # ── Class / MRO context ──
         caller_cls = _class_of_method(caller)
@@ -1050,10 +1151,18 @@ def _resolve_entry(root: Path, manifest_entry: Optional[Dict] = None) -> Optiona
     return None
 
 
-def diagnose_project(builder: ConstraintCallGraphBuilder, cg, project_root: Path) -> List[EdgeDiagnosis]:
+def diagnose_project(
+    builder: ConstraintCallGraphBuilder, cg, project_root: Path, *,
+    project_name: str = "",
+    entry_file: Optional[Path] = None,
+) -> List[EdgeDiagnosis]:
     gt_path = project_root / "callgraph.json"
     gt = _load_gt(gt_path)
-    diagnoser = MissingEdgeDiagnoser(builder, gt, cg, project_root)
+    diagnoser = MissingEdgeDiagnoser(
+        builder, gt, cg, project_root,
+        project_name=project_name,
+        entry_file=entry_file,
+    )
     return diagnoser.diagnose_all()
 
 
@@ -1210,7 +1319,11 @@ def main():
             signal.alarm(0)
 
             print(f"  Diagnosing missing edges ...", file=sys.stderr)
-            diagnoses = diagnose_project(builder, cg, proj_dir)
+            diagnoses = diagnose_project(
+                builder, cg, proj_dir,
+                project_name=name,
+                entry_file=entry_file,
+            )
             all_results.append((name, diagnoses))
 
             # Print per-project report immediately when -v/-vv/-vvv

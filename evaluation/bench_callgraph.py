@@ -364,52 +364,105 @@ def _resolve_entry_file(
             return candidate
     return None
 
+# ── known stdlib / third-party prefixes ──────────────────────────────
+# These modules are *not* part of any project under analysis and
+# should never receive the project-name prefix.  Without this list
+# normalization would produce noise like ``sshtunnel.socket.socket``.
+_STDLIB_PREFIXES = (
+    # stdlib
+    "abc.", "argparse.", "asyncio.", "base64.", "binascii.",
+    "builtins.", "collections.", "contextlib.", "copy.", "csv.",
+    "dataclasses.", "datetime.", "decimal.", "enum.", "fractions.",
+    "functools.", "gc.", "getopt.", "getpass.", "glob.", "hashlib.",
+    "hmac.", "html.", "http.", "importlib.", "inspect.", "io.",
+    "itertools.", "json.", "linecache.", "logging.", "math.",
+    "mmap.", "operator.", "os.", "pathlib.", "pickle.", "pkgutil.",
+    "platform.", "pprint.", "queue.", "random.", "re.", "reprlib.",
+    "shutil.", "signal.", "socket.", "statistics.", "string.",
+    "struct.", "subprocess.", "sys.", "sysconfig.", "tempfile.",
+    "textwrap.", "threading.", "time.", "traceback.", "types.",
+    "typing.", "unittest.", "urllib.", "warnings.", "weakref.",
+    "xml.", "zipfile.",
+    # common third-party (present in our benchmark corpus)
+    "click.", "numpy.", "pandas.", "paramiko.", "pygments.",
+    "requests.", "rich.",
+)
+
+
+def normalize_callgraph_name(
+    name: str, project_name: str, *, entry_file: Optional[Path] = None,
+) -> str:
+    """Normalize a single caller or callee name for a project.
+
+    PyFlow uses ``main`` as the module name for the entry file.  The GT
+    uses the project-qualified path (e.g. ``sshtunnel.main.X`` for a
+    standalone entry, or ``sqlparse.X`` when the entry is ``__init__.py``).
+    This function bridges that gap.
+
+    The only changes made here are *infrastructure alignment* fixes — they
+    do not alter the set of discovered edges, only how they are named.
+    """
+    # <builtin> / <dynamic> / <str> etc. — left as-is
+    if name.startswith("<"):
+        return name
+
+    # External stdlib / third-party — do NOT prepend project name
+    if any(name.startswith(p) for p in _STDLIB_PREFIXES):
+        return name
+
+    python_pkg = project_name.replace("-", "_")
+    is_init_entry = entry_file is not None and entry_file.name == "__init__.py"
+
+    # Already has the project-name or package-name prefix
+    if name.startswith(project_name + ".") or name.startswith(python_pkg + "."):
+        return name
+
+    # Entry-file definitions: PyFlow names them ``main`` or ``main.X``.
+    # - For standalone .py files the GT expects ``project.main.X``
+    # - For __init__.py the GT expects ``project.X`` (no extra segment)
+    if name == "main" or name.startswith("main."):
+        if is_init_entry:
+            if name == "main":
+                return project_name
+            return f"{project_name}.{name[len('main.'):]}"
+        else:
+            return f"{project_name}.{name}"
+
+    # Imported modules: PyFlow may use the bare module name (e.g.
+    # ``markdown`` instead of ``rich_cli.markdown``).  If the project
+    # uses a hyphenated name we must use the real Python package name
+    # (underscored) for cross-module imports, because that's what the
+    # GT uses.
+    if project_name != python_pkg:
+        return f"{python_pkg}.{name}"
+
+    return f"{project_name}.{name}"
+
 
 def _normalize_graph_for_project(
-    graph: Dict[str, Iterable[str]], project_name: str, *, strip_builtins: bool = True
+    graph: Dict[str, Iterable[str]], project_name: str, *,
+    strip_builtins: bool = True,
+    entry_file: Optional[Path] = None,
 ) -> Dict[str, List[str]]:
-    # print(f"Normalizing {project_name}")
-    BUILTIN_PREFIXES = (
-        "<builtin>",
-        "typing.",
-        "abc.",
-        "itertools.",
-        "functools.",
-        "collections.",
-        "pathlib.",
-        "argparse.",
-        "json.",
-        "threading.",
-        "queue.",
-        "math.",
-        "os.",
-        "sys.",
-        "io.",
-        "re.",
-        "hmac.",
-    )
+    """Normalize engine output names so they match the ground-truth convention.
 
+    See ``normalize_callgraph_name`` for the per-name logic.
+    """
     normalized: Dict[str, List[str]] = {}
     for caller, callees in graph.items():
         if strip_builtins and (caller.startswith("<builtin>") or caller.startswith("<")):
             continue
-        if any(caller.startswith(prefix) for prefix in BUILTIN_PREFIXES):
-            normalized_caller = caller
-        elif not caller.startswith(project_name):
-            normalized_caller = f"{project_name}.{caller}"
-        else:
-            normalized_caller = caller
 
+        normalized_caller = normalize_callgraph_name(
+            caller, project_name, entry_file=entry_file,
+        )
         normalized_callees = []
         for callee in callees:
             if strip_builtins and (callee.startswith("<builtin>") or callee.startswith("<")):
                 continue
-            if any(callee.startswith(prefix) for prefix in BUILTIN_PREFIXES):
-                normalized_callees.append(callee)
-            else:
-                if not callee.startswith(project_name):
-                    callee = f"{project_name}.{callee}"
-                normalized_callees.append(callee)
+            normalized_callees.append(normalize_callgraph_name(
+                callee, project_name, entry_file=entry_file,
+            ))
 
         normalized[normalized_caller] = normalized_callees
 
@@ -464,9 +517,12 @@ def _run_constraint_engine(project: Project, repeats: int, dump_missing: Optiona
             )
             elapsed = (time.perf_counter() - start) * 1000.0
             runtimes.append(elapsed)
-            normalized_graph = _normalize_graph_for_project(graph.get(), project.name, strip_builtins=normalize_gt)
+            normalized_graph = _normalize_graph_for_project(
+                graph.get(), project.name,
+                strip_builtins=normalize_gt,
+                entry_file=project.entry_file,
+            )
             predicted_edges = _adjacency_to_edges(normalized_graph)
-            # predicted_edges = _adjacency_to_edges(graph.get())
 
         gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
         precision, recall, tp, fp, fn = _score(
@@ -519,9 +575,12 @@ def _run_pycg_engine(project: Project, repeats: int, dump_missing: Optional[Path
                 )
                 elapsed = (time.perf_counter() - start) * 1000.0
                 runtimes.append(elapsed)
-                normalized_graph = _normalize_graph_for_project(graph.get(), project.name, strip_builtins=normalize_gt)
+                normalized_graph = _normalize_graph_for_project(
+                    graph.get(), project.name,
+                    strip_builtins=normalize_gt,
+                    entry_file=project.entry_file,
+                )
                 predicted_edges = _adjacency_to_edges(normalized_graph)
-                # predicted_edges = _adjacency_to_edges(graph.get())
 
             gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
             precision, recall, tp, fp, fn = _score(
@@ -956,7 +1015,11 @@ def _dump_project_graphs(project: Project, dump_dir: Path, normalize_gt: bool = 
             source_path=str(project.entry_file),
             allow_fixture_graph_loading=False,
         )
-        normalized_graph = _normalize_graph_for_project(cg.get(), project.name, strip_builtins=normalize_gt)
+        normalized_graph = _normalize_graph_for_project(
+            cg.get(), project.name,
+            strip_builtins=normalize_gt,
+            entry_file=project.entry_file,
+        )
         _write_callgraph_json(normalized_graph, out_dir / "constraint.json")
     except Exception:
         pass
@@ -973,7 +1036,11 @@ def _dump_project_graphs(project: Project, dump_dir: Path, normalize_gt: bool = 
                 )
             finally:
                 sys.argv = saved_argv
-            normalized_graph = _normalize_graph_for_project(cg.get(), project.name, strip_builtins=normalize_gt)
+            normalized_graph = _normalize_graph_for_project(
+                cg.get(), project.name,
+                strip_builtins=normalize_gt,
+                entry_file=project.entry_file,
+            )
             _write_callgraph_json(normalized_graph, out_dir / "pycg.json")
         except Exception:
             pass
