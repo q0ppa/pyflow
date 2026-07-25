@@ -1183,8 +1183,8 @@ def main():
     def _timeout_handler(signum, frame):
         raise TimeoutError("timeout")
 
-    # Collect all diagnoses first (for all-repo summary at default level)
     all_results: List[Tuple[str, List[EdgeDiagnosis]]] = []
+    out = open(args.output, "w") if args.output else sys.stdout
 
     for name, proj_dir, entry_file in targets:
         YELLOW = "\033[33;1m"
@@ -1213,6 +1213,15 @@ def main():
             diagnoses = diagnose_project(builder, cg, proj_dir)
             all_results.append((name, diagnoses))
 
+            # Print per-project report immediately when -v/-vv/-vvv
+            if args.verbose > 0:
+                print_report(diagnoses, name, verbose=args.verbose,
+                            show_filter=show_filter, file=out)
+                if args.output:
+                    out.flush()
+                else:
+                    sys.stdout.flush()
+
         except TimeoutError:
             print(f"  [SKIP] Timed out", file=sys.stderr)
         except Exception as e:
@@ -1221,18 +1230,14 @@ def main():
 
     if not all_results:
         print("[ERROR] All projects failed", file=sys.stderr)
+        if args.output:
+            out.close()
         sys.exit(1)
 
-    out = open(args.output, "w") if args.output else sys.stdout
     try:
         if args.verbose == 0:
-            # Default: all-repo summary
+            # Default: all-repo summary (printed once at end)
             _print_all_repo_summary(all_results, show_filter=show_filter, file=out)
-        else:
-            # -v/-vv/-vvv: per-repo detail
-            for name, diagnoses in all_results:
-                print_report(diagnoses, name, verbose=args.verbose,
-                            show_filter=show_filter, file=out)
     finally:
         if args.output:
             out.close()
