@@ -89,10 +89,11 @@ class EdgeDiagnosis:
 # ═══════════════════════════════════════════════════════════════════════
 
 class MissingEdgeDiagnoser:
-    def __init__(self, builder: ConstraintCallGraphBuilder, gt: Dict[str, List[str]], cg):
+    def __init__(self, builder: ConstraintCallGraphBuilder, gt: Dict[str, List[str]], cg, project_root: Path):
         self._builder = builder
         self._gt = gt
         self._cg_graph = cg
+        self._project_root = project_root
         self._cg_edges: Set[Tuple[str, str]] = set()
         self._cg_dynamic: Set[str] = set()
 
@@ -104,6 +105,16 @@ class MissingEdgeDiagnoser:
         for caller, callees in cg.get().items():
             if any(c.startswith("<dynamic") for c in callees):
                 self._cg_dynamic.add(caller)
+
+        # Build reverse index: unqualified function name → list of qualified names
+        self._unqualified_index: Dict[str, List[str]] = defaultdict(list)
+        for scope_name in builder.scopes:
+            unq = scope_name.rsplit('.', 1)[-1]
+            self._unqualified_index[unq].append(scope_name)
+        for func_name in builder.functions:
+            unq = func_name.rsplit('.', 1)[-1]
+            if func_name not in self._unqualified_index.get(unq, []):
+                self._unqualified_index[unq].append(func_name)
 
     # ── lookup helpers ──
 
@@ -242,43 +253,11 @@ class MissingEdgeDiagnoser:
 
         # ── CASE A: Caller doesnʼt exist at all ──
         if not d.caller_in_scopes and not d.caller_in_functions:
-            d.evidence.append(
-                f"Caller `{d.caller}` is not registered as a scope or function. "
-                "It was never collected — likely not reachable from the entry point's "
-                "import graph."
-            )
-            return "CALLER_NOT_COLLECTED"
+            return self._classify_not_collected(d, is_caller=True)
 
         # ── CASE B: Callee doesnʼt exist at all ──
         if not d.callee_in_scopes and not d.callee_in_functions:
-            d.evidence.append(
-                f"Callee `{d.callee}` is not registered as a scope or function. "
-            )
-            if d.callee_owner_class and d.callee_owner_class in self._builder.classes:
-                cinfo = self._class_info(d.callee_owner_class)
-                if cinfo:
-                    method_name = _method_name(d.callee)
-                    if method_name not in cinfo.methods:
-                        d.evidence.append(
-                            f"Class `{d.callee_owner_class}` exists but method "
-                            f"`{method_name}` is not in its `methods` dict. "
-                            f"Registered methods: {sorted(cinfo.methods.keys())[:10]}"
-                        )
-                    else:
-                        d.evidence.append(
-                            f"Class `{d.callee_owner_class}` exists and `{method_name}` "
-                            "is registered as a method, but no corresponding scope was created. "
-                            "This may indicate a symbol-collection gap."
-                        )
-                else:
-                    d.evidence.append(
-                        f"Class `{d.callee_owner_class}` not found in builder.classes."
-                    )
-            else:
-                d.evidence.append(
-                    "Callee class not registered; likely from an unloaded module or stdlib."
-                )
-            return "CALLEE_NOT_COLLECTED"
+            return self._classify_not_collected(d, is_caller=False)
 
         # ── CASE C: super().__init__() pattern ──
         if d.caller.endswith(".__init__") and d.callee.endswith(".__init__"):
@@ -300,6 +279,78 @@ class MissingEdgeDiagnoser:
         else:
             # Plain function call
             return self._classify_plain_call(d)
+
+    def _classify_not_collected(self, d: EdgeDiagnosis, is_caller: bool) -> str:
+        """Sub-classify a NOT_COLLECTED edge."""
+        name = d.caller if is_caller else d.callee
+        role = "Caller" if is_caller else "Callee"
+        unq = name.rsplit('.', 1)[-1]
+
+        # ── Check 1: Naming mismatch ──
+        candidates = self._unqualified_index.get(unq, [])
+        if candidates:
+            d.evidence.append(
+                f"{role} `{name}` not found, but {len(candidates)} scope(s) with "
+                f"same unqualified name `{unq}` EXIST: {candidates[:5]}"
+            )
+            d.evidence.append(
+                f"→ NAMING MISMATCH: function WAS collected, but under a different "
+                f"qualified name. GT expects `{name}`, PyFlow uses `{candidates[0]}`."
+            )
+            d.evidence.append(
+                "→ Cause: entry file loaded without package context "
+                "(e.g. `sshtunnel.py` → module `main`, not `sshtunnel`)."
+            )
+            return "NAMING_MISMATCH"
+
+        # ── Check 2: Is the module loaded? ──
+        parts = name.split('.')
+        module_candidate = None
+        for i in range(len(parts), 0, -1):
+            candidate = '.'.join(parts[:i])
+            if candidate in self._builder.modules:
+                module_candidate = candidate
+                break
+
+        if module_candidate:
+            mod_info = self._builder.modules[module_candidate]
+            import ast as ast_module
+            for node in ast_module.walk(mod_info.tree):
+                if isinstance(node, (ast_module.FunctionDef, ast_module.AsyncFunctionDef)):
+                    if node.name == unq:
+                        d.evidence.append(
+                            f"{role} `{name}` DEFINED in AST of loaded module "
+                            f"`{module_candidate}` (line {node.lineno}), but NOT "
+                            f"collected as scope → SYMBOL-COLLECTION BUG."
+                        )
+                        return "SYMBOL_NOT_COLLECTED"
+            d.evidence.append(
+                f"Module `{module_candidate}` loaded, but `{unq}` not in its AST. "
+                f"May be inherited or from another module."
+            )
+
+        # ── Check 3: File on disk? ──
+        found_file = None
+        for py_file in sorted(self._project_root.rglob('*.py')):
+            try:
+                if f'def {unq}' in py_file.read_text() or f'class {unq}' in py_file.read_text():
+                    found_file = py_file
+                    break
+            except Exception:
+                pass
+
+        if found_file:
+            d.evidence.append(
+                f"`{unq}` found in `{found_file.relative_to(self._project_root)}`, "
+                f"but file NOT loaded → IMPORT-RESOLUTION GAP."
+            )
+            return "MODULE_NOT_LOADED"
+        else:
+            d.evidence.append(
+                f"`{name}` not in any loaded module or project file → "
+                f"external/third-party code."
+            )
+            return "EXTERNAL_NOT_AVAILABLE"
 
     def _classify_super_init(self, d: EdgeDiagnosis) -> str:
         """Diagnose super().__init__() resolution failure."""
@@ -664,111 +715,77 @@ class MissingEdgeDiagnoser:
 # ═══════════════════════════════════════════════════════════════════════
 
 ROOT_CAUSE_CATALOG: Dict[str, Tuple[str, str]] = {
-    # ── Reachability gap (no concrete call path exists) ──
     "UNREACHABLE_CALLER": (
-        "Caller is not invoked by any reachable code; self/cls params are ∅. "
-        "The method body is never analysed with real receiver values.",
-        "Add a synthetic driver that instantiates classes and exercises methods, "
-        "or inject conservative self values during class-body analysis.",
+        "self/cls empty because caller is never invoked from entry point.",
+        "Add synthetic driver, or inject conservative self values in class-body analysis.",
     ),
-    # ── super().__init__() variants ──
     "SUPER_INIT_UNREACHABLE": (
-        "super().__init__() in an unreachable method — compound failure: "
-        "lack of reachability PLUS super() protocol model gaps.",
-        "Both (a) reachability injection AND (b) super() model fixes are needed.",
+        "super().__init__() in an unreachable method — compound failure.",
+        "Both reachability injection and super() model fixes are needed.",
     ),
     "SUPER_INIT_EMPTY_SELF": (
-        "super().__init__() in a reachable method, but self is still ∅ — "
-        "callers pass ⊤ or imprecise receiver values.",
-        "Check why callers can't propagate concrete instance types to self.",
+        "super().__init__() reachable but self empty — callers pass ⊤ for receiver.",
+        "Check why upstream callers can't propagate concrete instance types.",
     ),
     "SUPER_INIT_RESOLUTION_FAILED": (
-        "super().__init__() with non-empty self, but the next __init__ in MRO "
-        "was not resolved. The super() protocol model is incomplete or the "
-        "class's MRO is broken (e.g. generic subscript not parsed).",
-        "Fix generic subscript parsing in _resolve_class_bases(), or improve "
-        "the super() protocol reduction to handle indirect __init__ inheritance.",
+        "super().__init__() with non-empty self, but MRO or super() model failed.",
+        "Fix generic subscript parsing in _resolve_class_bases(), or improve super() protocol.",
     ),
-    # ── Method calls on self/cls ──
     "EMPTY_SELF_DESPITE_REACHABLE": (
-        "Method has incoming calls but self/cls parameter receives no values — "
-        "receiver identity was lost during interprocedural propagation.",
-        "Trace upstream: which callers invoke this method, and what values do they "
-        "pass for the receiver argument? The receiver may be ⊤ or lost in "
-        "container/return/closure forwarding.",
+        "Method has incoming calls but self is ∅ — receiver lost during propagation.",
+        "Trace upstream: which callers invoke this, and what do they pass for self?",
     ),
     "ATTR_LOOKUP_FAILED": (
-        "self has a concrete instance type AND callee scope exists, but "
-        "_resolve_attribute's INSTANCE_KIND branch produced nothing. "
-        "This is a gap in MRO traversal or method resolution.",
-        "Check: does the callee method appear in the class's MRO methods dict? "
-        "Are staticmethod/classmethod decorators handled correctly? "
-        "Is the callee registered under the qualified name the lookup expects?",
+        "self has type, callee exists, but _resolve_attribute produced nothing.",
+        "Check MRO traversal, method registration names, staticmethod/classmethod handling.",
     ),
     "ATTR_LOOKUP_CALLEE_NOT_REGISTERED": (
-        "self has a concrete type and attr lookup may have produced a value, "
-        "but that value was never registered as a scope/function.",
-        "The callee function was not collected — check symbol collection for "
-        "the class containing it (maybe an abstract method or property?).",
+        "self has type, attr may have resolved, but callee not registered as scope.",
+        "The callee was not collected — check symbol collection for its containing class.",
     ),
-    # ── Callee/caller not collected ──
-    "CALLER_NOT_COLLECTED": (
-        "The caller function was never collected as a scope. It may be in an "
-        "unloaded module, a native extension, or a dynamically generated function.",
-        "Check module loading: is the caller's source file resolved and parsed?",
+    "NAMING_MISMATCH": (
+        "Function collected but under a different qualified name prefix.",
+        "Set _entry_file in manifest.json, or normalize names in benchmark runner.",
     ),
-    "CALLEE_NOT_COLLECTED": (
-        "The callee function was never collected as a scope. It may be inherited "
-        "from an unloaded stdlib module, a native function, or missed during "
-        "symbol collection.",
-        "Check: is the callee's containing class/module loaded? Is it a "
-        "dynamically generated function (e.g. namedtuple, dataclass __init__)?",
+    "SYMBOL_NOT_COLLECTED": (
+        "Function defined in loaded module AST but not collected → _collect_symbols() bug.",
+        "Debug why symbol collector skipped this definition.",
     ),
-    # ── Model boundary ──
-    "MODEL_BOUNDARY": (
-        "Caller HAS a dynamic summary — this is an expected boundary crossing "
-        "under the paper's abstraction (Theorem clause 3). The edge exists in "
-        "concrete execution but the abstract domain cannot name the target.",
-        "Consider extending the protocol model (descriptors, metaclasses, "
-        "reflective calls, external library summaries) to recover a named edge.",
+    "SCOPE_NOT_CREATED": (
+        "Method in ClassInfo.methods but no scope → _initialize_scopes() gap.",
+        "Check if scope initializer filters out certain methods (abstract, property, etc).",
     ),
-    # ── Implementation gap ──
-    "IMPLEMENTATION_GAP": (
-        "Caller has NO dynamic summary and NO named edge — the paper's "
-        "soundness theorem (clause 2) guarantees an edge should exist for "
-        "modeled semantics. This is an implementation bug.",
-        "Debug the specific constraint rule that should have produced this edge "
-        "([InstMethod], [BoundCall], [FunCall], etc.) and trace why it didn't fire.",
+    "MODULE_NOT_LOADED": (
+        "Source file exists on disk but was not loaded by PyFlow.",
+        "Entry point import graph doesn't reach this file — may be legitimate if truly unreachable.",
     ),
-    # ── Plain function call failures ──
+    "EXTERNAL_NOT_AVAILABLE": (
+        "Not defined in any project file — external/third-party code.",
+        "Legitimate gap: PyFlow cannot analyze code it doesn't have.",
+    ),
     "RECURSIVE_UNRESOLVED": (
-        "A function that calls itself (recursive) cannot resolve its own name. "
-        "Typically happens for nested/local functions whose internal name "
-        "differs from the scope-registered qualified name.",
-        "Check how nested function names are registered vs how they are "
-        "looked up in the enclosing scope. The name binding may not propagate.",
+        "Function calls itself but can't resolve its own qualified name.",
+        "Nested function name differs from scope-registered name — fix name resolution.",
     ),
     "RECEIVER_LOST": (
-        "A reachable closure/function has a parameter that serves as receiver "
-        "for method calls, but that parameter's value is ⊤ (unknown). "
-        "Without a concrete receiver type, attribute lookup cannot resolve "
-        "the method.",
-        "Trace upstream: where does the ⊤-valued parameter come from? "
-        "It may originate from a container load, a return value merge, "
-        "or a dynamic/reflective operation.",
+        "Closure/function has ⊤-valued parameter used as receiver for method calls.",
+        "Trace upstream: where does the ⊤ come from (container load, return merge, reflection)?",
     ),
     "BUILTIN_PROTOCOL_GAP": (
-        "A Python builtin (e.g. `str(x)`, `len(x)`, `iter(x)`) implicitly "
-        "invokes a dunder method (`__str__`, `__len__`, `__iter__`), but "
-        "PyFlow does not model this connection. The GT records the dunder "
-        "method as the callee.",
-        "Model the builtin-to-dunder protocol: when `str(x)` is called and "
-        "x has a concrete type, emit a synthetic edge to `x.__str__()`.",
+        "Builtin (e.g. str(x)) implicitly calls dunder (__str__) but PyFlow doesn't model it.",
+        "Model builtin-to-dunder protocol: str(x) → x.__str__(), etc.",
     ),
-    # ── Fallback ──
+    "IMPLEMENTATION_GAP": (
+        "No named edge, no dynamic summary — violates paper soundness theorem clause 2.",
+        "Debug the specific constraint rule that should have produced this edge.",
+    ),
+    "MODEL_BOUNDARY": (
+        "Caller has dynamic summary — expected boundary under paper Theorem clause 3.",
+        "Extend protocol model to recover a named edge.",
+    ),
     "UNKNOWN": (
-        "Could not classify this missing edge into a known category.",
-        "Manual investigation needed. Run with -vv to see full evidence.",
+        "Could not classify — manual investigation needed.",
+        "Run with -vv to see full evidence.",
     ),
 }
 
@@ -779,54 +796,91 @@ def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int
 
     total = len(diagnoses)
 
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
-    print(f"\n{'='*72}")
-    print(f"  {BOLD}DEEP DIAGNOSTIC: {project_name}{RESET}")
-    print(f"  {total} missing edges analysed")
-    print(f"{'='*72}")
+    FIXABLE = {
+        "SUPER_INIT_RESOLUTION_FAILED", "RECURSIVE_UNRESOLVED",
+        "BUILTIN_PROTOCOL_GAP", "EMPTY_SELF_DESPITE_REACHABLE",
+        "ATTR_LOOKUP_FAILED", "RECEIVER_LOST", "SYMBOL_NOT_COLLECTED",
+        "SCOPE_NOT_CREATED",
+    }
+    INFRA = {
+        "NAMING_MISMATCH", "MODULE_NOT_LOADED", "EXTERNAL_NOT_AVAILABLE",
+    }
+    REACHABILITY = {
+        "UNREACHABLE_CALLER", "SUPER_INIT_UNREACHABLE", "SUPER_INIT_EMPTY_SELF",
+    }
 
-    print(f"\n{'─'*72}")
-    print(f"  ROOT CAUSE CATALOG")
-    print(f"{'─'*72}")
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    BLUE = "\033[34m"
+    RESET = "\033[0m"
+
+    # Tight tags for summary line
+    T_FIX = f"{RED}[fix]{RESET}"
+    T_REACH = f"{GREEN}[reach]{RESET}"
+    T_NAME = f"{BLUE}[name]{RESET}"
+
+    # Fixed-width tags (8 visual chars including trailing space) for catalog alignment
+    TAG_FIX  = f"{RED}[fix]   {RESET}"
+    TAG_REACH = f"{GREEN}[reach] {RESET}"
+    TAG_NAME  = f"{BLUE}[name]  {RESET}"
+
+    def _tag(cat: str) -> str:
+        if cat in FIXABLE:
+            return TAG_FIX
+        elif cat in REACHABILITY:
+            return TAG_REACH
+        elif cat in INFRA:
+            return TAG_NAME
+        return "         "
+
+    # ── Header ──
+    print(f"\n  {total} missing edges")
+
+    # ── Catalog ──
+    fixable_count = sum(len(by_cat.get(c, [])) for c in FIXABLE)
+    infra_count = sum(len(by_cat.get(c, [])) for c in INFRA)
+    reach_count = sum(len(by_cat.get(c, [])) for c in REACHABILITY)
+    other_count = total - fixable_count - infra_count - reach_count
+
     for cat in sorted(by_cat, key=lambda c: len(by_cat[c]), reverse=True):
         count = len(by_cat[cat])
         pct = count / total * 100
-        desc = ROOT_CAUSE_CATALOG.get(cat, ("(no description)", ""))
-        print(f"  {BOLD}{cat}{RESET}  ({count:3d}, {pct:5.1f}%)")
-        print(f"    {desc[0]}")
+        desc = ROOT_CAUSE_CATALOG.get(cat, ("", ""))[0]
+        tag = _tag(cat)
+        print(f"  {tag}{cat:<42} {count:>4d} ({pct:5.1f}%)")
+        if desc:
+            print(f"       {desc}")
+
+    print(f"\n  {T_FIX}={fixable_count}  {T_NAME}={infra_count}  {T_REACH}={reach_count}  other={other_count}")
 
     if verbose == 0:
-        # Just summary — done
         return
 
-    # -v & -vv: per-category details
+    if verbose >= 2:
+        print(f"\n  ── details (-vv) ──")
+    else:
+        print(f"\n  ── details (-v, 3 examples each) ──")
+
     for cat in sorted(by_cat, key=lambda c: len(by_cat[c]), reverse=True):
         items = by_cat[cat]
-        print(f"{'─'*72}")
-        print(f"  {cat}  ({len(items)} edges)")
-        print(f"{'─'*72}")
+        tag = _tag(cat)
+        desc = ROOT_CAUSE_CATALOG.get(cat, ("", ""))
+        print(f"\n  {tag} {cat}  ({len(items)} edges)")
+        if desc[1]:
+            print(f"  → {desc[1]}")
 
-        if verbose >= 2:
-            # -vv: show ALL edges with full evidence
-            show = items
-        else:
-            # -v: show first 3 examples per category + 1 line per remaining
-            show = items[:3]
-
+        show = items if verbose >= 2 else items[:3]
         for diag in show:
-            print(f"\n  ✗  {diag.caller}")
-            print(f"     → {diag.callee}")
+            print(f"\n    ✗ {diag.caller}")
+            print(f"      → {diag.callee}")
             for ev in diag.evidence:
-                for line in textwrap.wrap(ev, width=66, initial_indent="     • ", subsequent_indent="       "):
+                for line in textwrap.wrap(ev, width=64, initial_indent="      • ", subsequent_indent="        "):
                     print(line)
 
         if verbose < 2 and len(items) > 3:
-            print(f"\n  ... and {len(items) - 3} more edges of this type")
-            # List remaining edge pairs compactly
+            print(f"\n    ... and {len(items) - 3} more")
             for diag in items[3:]:
                 print(f"      {diag.caller}  →  {diag.callee}")
-        print()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -867,7 +921,7 @@ def _resolve_entry(root: Path, manifest_entry: Optional[Dict] = None) -> Optiona
 def diagnose_project(builder: ConstraintCallGraphBuilder, cg, project_root: Path) -> List[EdgeDiagnosis]:
     gt_path = project_root / "callgraph.json"
     gt = _load_gt(gt_path)
-    diagnoser = MissingEdgeDiagnoser(builder, gt, cg)
+    diagnoser = MissingEdgeDiagnoser(builder, gt, cg, project_root)
     return diagnoser.diagnose_all()
 
 
@@ -922,9 +976,9 @@ def main():
         raise TimeoutError("timeout")
 
     for name, proj_dir, entry_file in targets:
-        BOLD = "\033[1m"
+        YELLOW = "\033[33;1m"
         RESET = "\033[0m"
-        print(f"\n{'─'*72}\n  {BOLD}{name}{RESET}\n{'─'*72}", file=sys.stderr)
+        print(f"\n{YELLOW}{name}{RESET}", file=sys.stderr)
         try:
             signal.signal(signal.SIGALRM, _timeout_handler)
             signal.alarm(120)
