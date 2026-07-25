@@ -259,11 +259,12 @@ class MissingEdgeDiagnoser:
         if not d.callee_in_scopes and not d.callee_in_functions:
             return self._classify_not_collected(d, is_caller=False)
 
-        # ── CASE C: super().__init__() pattern ──
-        if d.caller.endswith(".__init__") and d.callee.endswith(".__init__"):
-            return self._classify_super_init(d)
+        # ── CASE C: MRO broken by generic subscript? ──
+        mro_result = self._classify_mro(d)
+        if mro_result:
+            return mro_result
 
-        # ── CASE D: Method call on self ──
+        # ── CASE D: Method call ──
         func_info = self._func_info(d.caller)
         scope_info = self._scope_info(d.caller)
         is_method = (func_info and func_info.is_method) or (
@@ -271,14 +272,87 @@ class MissingEdgeDiagnoser:
         )
 
         if is_method and d.self_value_kinds:
-            # self has values — attribute lookup should have worked
             return self._classify_attr_lookup(d)
         elif is_method and not d.self_value_kinds:
-            # self is empty — why?
             return self._classify_empty_self(d)
         else:
-            # Plain function call
             return self._classify_plain_call(d)
+
+    def _classify_mro(self, d: EdgeDiagnosis) -> Optional[str]:
+        """Check if the missing edge is caused by MRO breakage from generic subscript.
+        
+        Returns a category string if MRO breakage is detected, None otherwise.
+        """
+        caller_cls = _class_of_method(d.caller)
+        callee_cls = _class_of_method(d.callee)
+        if not caller_cls or not callee_cls:
+            return None
+
+        cinfo = self._class_info(caller_cls)
+        if not cinfo or not cinfo.node:
+            return None
+
+        # Check: are there raw AST bases with Subscript that were dropped?
+        import ast as ast_module
+        has_subscript_base = False
+        for raw_base in cinfo.node.bases:
+            if isinstance(raw_base, ast_module.Subscript):
+                has_subscript_base = True
+                break
+            if isinstance(raw_base, ast_module.Call):
+                has_subscript_base = True
+                break
+
+        if not has_subscript_base:
+            return None
+
+        # Check: is callee class reachable through one of the DROPPED bases?
+        mro = self._mro(caller_cls)
+        if callee_cls in mro:
+            return None  # callee IS in MRO — not an MRO problem
+
+        # The callee class is NOT in the caller's MRO.
+        # Is it in the MRO of any DROPPED base?
+        for raw_base in cinfo.node.bases:
+            if not isinstance(raw_base, (ast_module.Subscript, ast_module.Call)):
+                continue
+            # Extract base class name from the Subscript/Call
+            base_value = raw_base.value if isinstance(raw_base, ast_module.Subscript) else raw_base.func
+            if isinstance(base_value, ast_module.Name):
+                base_name = base_value.id
+            elif isinstance(base_value, ast_module.Attribute):
+                base_name = ast_module.unparse(base_value)
+            else:
+                continue
+
+            # Find the actual qualified class for this base name
+            for cls_name in self._builder.classes:
+                if cls_name.endswith(f".{base_name}") or cls_name == base_name:
+                    base_mro = self._mro(cls_name)
+                    if callee_cls in base_mro:
+                        d.evidence.append(
+                            f"⚠ MRO BROKEN: generic subscript `{ast_module.unparse(raw_base)}` "
+                            f"was dropped by _resolve_class_bases()."
+                        )
+                        d.evidence.append(
+                            f"  Caller class: `{caller_cls}`  resolved bases: {cinfo.bases}"
+                        )
+                        d.evidence.append(
+                            f"  Dropped base `{cls_name}` has MRO {base_mro} which "
+                            f"includes callee class `{callee_cls}`."
+                        )
+                        d.evidence.append(
+                            f"  Caller's actual MRO: {mro}  ← callee missing from this chain."
+                        )
+                        d.evidence.append(
+                            f"→ Root cause: _resolve_class_bases() does not handle "
+                            f"ast.Subscript (generic type parameters). "
+                            f"The base class `{base_name}` was silently dropped, "
+                            f"breaking the entire MRO chain."
+                        )
+                        return "MRO_BROKEN"
+
+        return None
 
     def _classify_not_collected(self, d: EdgeDiagnosis, is_caller: bool) -> str:
         """Sub-classify a NOT_COLLECTED edge."""
@@ -553,6 +627,39 @@ class MissingEdgeDiagnoser:
             )
             return "ATTR_LOOKUP_CALLEE_NOT_REGISTERED"
 
+        # ── AST-level pattern check ──
+        callee_method = _method_name(d.callee)
+        scope = self._builder.scopes.get(d.caller)
+        if scope:
+            import ast as ast_module
+            for stmt in scope.body:
+                for node in ast_module.walk(stmt):
+                    if isinstance(node, ast_module.Call):
+                        # Pattern: str(x) / len(x) / iter(x) → builtin protocol gap
+                        if isinstance(node.func, ast_module.Name):
+                            if node.func.id in ('str', 'len', 'iter', 'repr', 'bool', 'int'):
+                                if callee_method == '__str__' and node.func.id == 'str':
+                                    d.evidence.append(
+                                        f"Call pattern is `str(x)` → GT expects edge to `x.__str__()`. "
+                                        f"This is a BUILTIN_PROTOCOL_GAP, not an attr-lookup failure."
+                                    )
+                                    return "BUILTIN_PROTOCOL_GAP"
+                        # Pattern: self.method() where method == callee
+                        if isinstance(node.func, ast_module.Attribute):
+                            if node.func.attr == callee_method:
+                                if isinstance(node.func.value, ast_module.Name):
+                                    rcvr = node.func.value.id
+                                    call_str = ast_module.unparse(node)[:120]
+                                    if rcvr == 'self' and d.caller == d.callee:
+                                        d.evidence.append(
+                                            f"Call pattern: `{call_str}` — recursive self-call. "
+                                            f"May also match RECURSIVE_UNRESOLVED."
+                                        )
+                                    else:
+                                        d.evidence.append(
+                                            f"Call pattern: `{call_str}`"
+                                        )
+
         d.evidence.append(
             "self has a value AND callee exists, but the edge was not produced. "
             "This suggests a gap in _resolve_attribute's INSTANCE_KIND branch or "
@@ -719,29 +826,17 @@ ROOT_CAUSE_CATALOG: Dict[str, Tuple[str, str]] = {
         "self/cls empty because caller is never invoked from entry point.",
         "Add synthetic driver, or inject conservative self values in class-body analysis.",
     ),
-    "SUPER_INIT_UNREACHABLE": (
-        "super().__init__() in an unreachable method — compound failure.",
-        "Both reachability injection and super() model fixes are needed.",
-    ),
-    "SUPER_INIT_EMPTY_SELF": (
-        "super().__init__() reachable but self empty — callers pass ⊤ for receiver.",
-        "Check why upstream callers can't propagate concrete instance types.",
-    ),
-    "SUPER_INIT_RESOLUTION_FAILED": (
-        "super().__init__() with non-empty self, but MRO or super() model failed.",
-        "Fix generic subscript parsing in _resolve_class_bases(), or improve super() protocol.",
+    "MRO_BROKEN": (
+        "Generic subscript (e.g. Sink[Any]) dropped by _resolve_class_bases() → MRO missing.",
+        "Fix _resolve_class_bases() to handle ast.Subscript: extract the base class from Subscript.value.",
     ),
     "EMPTY_SELF_DESPITE_REACHABLE": (
-        "Method has incoming calls but self is ∅ — receiver lost during propagation.",
-        "Trace upstream: which callers invoke this, and what do they pass for self?",
+        "Method has incoming edges but self is ∅ (caller is also unreachable).",
+        "Transitive reachability gap — not a bug in the method itself.",
     ),
     "ATTR_LOOKUP_FAILED": (
         "self has type, callee exists, but _resolve_attribute produced nothing.",
         "Check MRO traversal, method registration names, staticmethod/classmethod handling.",
-    ),
-    "ATTR_LOOKUP_CALLEE_NOT_REGISTERED": (
-        "self has type, attr may have resolved, but callee not registered as scope.",
-        "The callee was not collected — check symbol collection for its containing class.",
     ),
     "NAMING_MISMATCH": (
         "Function collected but under a different qualified name prefix.",
@@ -753,35 +848,27 @@ ROOT_CAUSE_CATALOG: Dict[str, Tuple[str, str]] = {
     ),
     "SCOPE_NOT_CREATED": (
         "Method in ClassInfo.methods but no scope → _initialize_scopes() gap.",
-        "Check if scope initializer filters out certain methods (abstract, property, etc).",
+        "Check if scope initializer filters out certain methods.",
     ),
     "MODULE_NOT_LOADED": (
-        "Source file exists on disk but was not loaded by PyFlow.",
-        "Entry point import graph doesn't reach this file — may be legitimate if truly unreachable.",
+        "Source file exists on disk but was not loaded — entry point doesn't reach it.",
+        "Module-level reachability gap: entry file doesn't import this module.",
     ),
     "EXTERNAL_NOT_AVAILABLE": (
-        "Not defined in any project file — external/third-party code.",
+        "Not defined in any project file — builtin or third-party code.",
         "Legitimate gap: PyFlow cannot analyze code it doesn't have.",
     ),
     "RECURSIVE_UNRESOLVED": (
         "Function calls itself but can't resolve its own qualified name.",
-        "Nested function name differs from scope-registered name — fix name resolution.",
+        "Scope name resolution issue — check _eval_expr for ast.Name lookup.",
     ),
     "RECEIVER_LOST": (
-        "Closure/function has ⊤-valued parameter used as receiver for method calls.",
-        "Trace upstream: where does the ⊤ come from (container load, return merge, reflection)?",
+        "Closure/function has ⊤-valued parameter used as receiver — conservative may-analysis.",
+        "Expected behavior: closure-captured types can be lost to ⊤. Not a bug.",
     ),
     "BUILTIN_PROTOCOL_GAP": (
         "Builtin (e.g. str(x)) implicitly calls dunder (__str__) but PyFlow doesn't model it.",
         "Model builtin-to-dunder protocol: str(x) → x.__str__(), etc.",
-    ),
-    "IMPLEMENTATION_GAP": (
-        "No named edge, no dynamic summary — violates paper soundness theorem clause 2.",
-        "Debug the specific constraint rule that should have produced this edge.",
-    ),
-    "MODEL_BOUNDARY": (
-        "Caller has dynamic summary — expected boundary under paper Theorem clause 3.",
-        "Extend protocol model to recover a named edge.",
     ),
     "UNKNOWN": (
         "Could not classify — manual investigation needed.",
@@ -789,25 +876,36 @@ ROOT_CAUSE_CATALOG: Dict[str, Tuple[str, str]] = {
     ),
 }
 
-def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int = 0, file=sys.stdout):
+# Tier classification (used by print_report and CLI help)
+FIXABLE_TIER = {
+    "MRO_BROKEN", "ATTR_LOOKUP_FAILED", "RECURSIVE_UNRESOLVED",
+    "BUILTIN_PROTOCOL_GAP", "SYMBOL_NOT_COLLECTED", "SCOPE_NOT_CREATED",
+}
+REACHABILITY_TIER = {
+    "UNREACHABLE_CALLER", "RECEIVER_LOST", "EMPTY_SELF_DESPITE_REACHABLE",
+    "EXTERNAL_NOT_AVAILABLE", "MODULE_NOT_LOADED",
+}
+INFRA_TIER = {
+    "NAMING_MISMATCH",
+}
+
+# ANSI colors used by both print_report and CLI help/errors
+C_RED = "\033[31m"
+C_GREEN = "\033[32m"
+C_BLUE = "\033[34m"
+C_RESET = "\033[0m"
+
+def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int = 0,
+                 show_filter: Optional[Set[str]] = None, file=sys.stdout):
     by_cat: Dict[str, List[EdgeDiagnosis]] = defaultdict(list)
     for d in diagnoses:
         by_cat[d.category].append(d)
 
     total = len(diagnoses)
 
-    FIXABLE = {
-        "SUPER_INIT_RESOLUTION_FAILED", "RECURSIVE_UNRESOLVED",
-        "BUILTIN_PROTOCOL_GAP", "EMPTY_SELF_DESPITE_REACHABLE",
-        "ATTR_LOOKUP_FAILED", "RECEIVER_LOST", "SYMBOL_NOT_COLLECTED",
-        "SCOPE_NOT_CREATED",
-    }
-    INFRA = {
-        "NAMING_MISMATCH", "MODULE_NOT_LOADED", "EXTERNAL_NOT_AVAILABLE",
-    }
-    REACHABILITY = {
-        "UNREACHABLE_CALLER", "SUPER_INIT_UNREACHABLE", "SUPER_INIT_EMPTY_SELF",
-    }
+    FIXABLE = FIXABLE_TIER
+    REACHABILITY = REACHABILITY_TIER
+    INFRA = INFRA_TIER
 
     RED = "\033[31m"
     GREEN = "\033[32m"
@@ -862,6 +960,8 @@ def print_report(diagnoses: List[EdgeDiagnosis], project_name: str, verbose: int
         print(f"\n  ── details (-v, 3 examples each) ──")
 
     for cat in sorted(by_cat, key=lambda c: len(by_cat[c]), reverse=True):
+        if show_filter and cat not in show_filter:
+            continue
         items = by_cat[cat]
         tag = _tag(cat)
         desc = ROOT_CAUSE_CATALOG.get(cat, ("", ""))
@@ -930,13 +1030,46 @@ def diagnose_project(builder: ConstraintCallGraphBuilder, cg, project_root: Path
 # ═══════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="Deep-diagnose missing call-graph edges.")
+    # Build a color-coded root cause listing for help/errors
+    _fix_cats = sorted([c for c in ROOT_CAUSE_CATALOG if c in FIXABLE_TIER])
+    _name_cats = sorted([c for c in ROOT_CAUSE_CATALOG if c in INFRA_TIER])
+    _reach_cats = sorted([c for c in ROOT_CAUSE_CATALOG if c in REACHABILITY_TIER])
+    _other_cats = sorted([c for c in ROOT_CAUSE_CATALOG if c not in FIXABLE_TIER and c not in INFRA_TIER and c not in REACHABILITY_TIER])
+    _cat_list = (
+        f"{C_RED}[fix]{C_RESET} " + ", ".join(_fix_cats) + "\n"
+        f"{C_BLUE}[name]{C_RESET} " + ", ".join(_name_cats) + "\n"
+        f"{C_GREEN}[reach]{C_RESET} " + ", ".join(_reach_cats)
+    )
+    if _other_cats:
+        _cat_list += "\nother: " + ", ".join(_other_cats)
+
+    parser = argparse.ArgumentParser(
+        description="Deep-diagnose missing call-graph edges.",
+        epilog=f"Root cause categories:\n{_cat_list}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--corpus", type=Path, default=Path("evaluation/repo_level"))
     parser.add_argument("--project", type=str, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("-v", "--verbose", action="count", default=0,
                         help="-v: show per-category examples; -vv: show all edges with full evidence")
+    parser.add_argument("--show", action="append", default=None,
+                        help="Only show verbose details for this root cause (repeatable)")
     args = parser.parse_args()
+    
+    # Validate --show values
+    if args.show:
+        unknown = set(args.show) - set(ROOT_CAUSE_CATALOG.keys())
+        if unknown:
+            print(f"[ERROR] Unknown root cause(s): {', '.join(sorted(unknown))}", file=sys.stderr)
+            print(f"        {C_RED}[fix]{C_RESET} " + ", ".join(sorted(c for c in ROOT_CAUSE_CATALOG if c in FIXABLE_TIER)), file=sys.stderr)
+            print(f"        {C_BLUE}[name]{C_RESET} " + ", ".join(sorted(c for c in ROOT_CAUSE_CATALOG if c in INFRA_TIER)), file=sys.stderr)
+            print(f"        {C_GREEN}[reach]{C_RESET} " + ", ".join(sorted(c for c in ROOT_CAUSE_CATALOG if c in REACHABILITY_TIER)), file=sys.stderr)
+            other_c = sorted(c for c in ROOT_CAUSE_CATALOG if c not in FIXABLE_TIER and c not in INFRA_TIER and c not in REACHABILITY_TIER)
+            if other_c:
+                print(f"        other: " + ", ".join(other_c), file=sys.stderr)
+            sys.exit(1)
+    show_filter = set(args.show) if args.show else None
 
     corpus = args.corpus.resolve()
     if not corpus.is_dir():
@@ -1003,7 +1136,8 @@ def main():
 
             out = open(args.output, "w") if args.output else sys.stdout
             try:
-                print_report(diagnoses, name, verbose=args.verbose, file=out)
+                print_report(diagnoses, name, verbose=args.verbose,
+                            show_filter=show_filter, file=out)
             finally:
                 if args.output:
                     out.close()
