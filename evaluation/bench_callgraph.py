@@ -261,6 +261,7 @@ class EngineResult:
     tp: int
     fp: int
     fn: int
+    coverage: float = 0.0  # |analysed| / |GT callers| (constraint only)
     error: Optional[str] = None
 
 
@@ -344,6 +345,15 @@ def _resolve_entry_file(
     gt_path: Path,
     manifest_entry: Optional[Dict[str, object]] = None,
 ) -> Optional[Path]:
+    # Manifest _entry_file takes priority (it is the bench configuration
+    # and may point to a synthesised driver).
+    if manifest_entry:
+        mf_entry = manifest_entry.get("_entry_file")
+        if mf_entry:
+            candidate = root / str(mf_entry)
+            if candidate.is_file():
+                return candidate
+
     try:
         raw = json.loads(gt_path.read_text(encoding="utf-8"))
     except Exception:
@@ -352,12 +362,7 @@ def _resolve_entry_file(
     candidate = root / str(entry_name)
     if candidate.is_file():
         return candidate
-    if manifest_entry:
-        mf_entry = manifest_entry.get("_entry_file")
-        if mf_entry:
-            candidate = root / str(mf_entry)
-            if candidate.is_file():
-                return candidate
+
     for fallback in ("main.py", "__init__.py", "source.py", f"{root.name}.py"):
         candidate = root / fallback
         if candidate.is_file():
@@ -413,8 +418,26 @@ def normalize_callgraph_name(
     python_pkg = project_name.replace("-", "_")
     is_init_entry = entry_file is not None and entry_file.name == "__init__.py"
 
-    # Already has the project-name or package-name prefix
-    if name.startswith(project_name + ".") or name.startswith(python_pkg + "."):
+    # Already has the project-name or package-name prefix.
+    # Special case: when project_name != python_pkg (e.g. rich-cli vs
+    # rich_cli), the entry module uses project_name while imported
+    # submodules use python_pkg.  Detect the entry-module namespace
+    # (``main.*`` or its python_pkg equivalent) and normalise it to
+    # project_name.
+    if name.startswith(project_name + "."):
+        return name
+    if name.startswith(python_pkg + "."):
+        if project_name != python_pkg:
+            # Does this name fall under the entry-module namespace?
+            # The entry module is ``main`` (raw) which normalises to
+            # ``project_name.main``.  Check whether the first component
+            # after python_pkg matches the entry module stem.
+            suffix = name[len(python_pkg) + 1:]
+            first_dot = suffix.find(".")
+            first_comp = suffix[:first_dot] if first_dot > 0 else suffix
+            if first_comp == "main":
+                # Rewrite python_pkg.main.* → project_name.main.*
+                return f"{project_name}.{suffix}"
         return name
 
     # Entry-file definitions: PyFlow names them ``main`` or ``main.X``.
@@ -483,47 +506,46 @@ def _normalize_gt(graph: Dict[str, Iterable[str]]) -> Dict[str, List[str]]:
 
 
 def _compute_analysed_callers(
-    raw_graph: Dict[str, Iterable[str]],
-    project_name: str,
-    entry_file: Optional[Path],
+    normalized_graph: Dict[str, Iterable[str]],
 ) -> Set[str]:
-    """Return the set of *normalized* caller names that were truly analysed.
+    """Return the set of caller names that were truly analysed.
 
-    A caller is "analysed" when it produced at least one *project-internal*
-    outgoing edge — i.e. a callee that does NOT start with ``<``.  Callers
-    whose bodies only yielded ``<builtin>`` / ``<dynamic>`` edges (because
-    ``self`` was ⊤ or the receiver was lost) are excluded: their bodies
-    were never meaningfully processed.
+    A caller is "analysed" when its normalised callee list is non-empty
+    — i.e. it produced at least one edge that survived stripping of
+    ``<builtin>`` / ``<dynamic>`` entries.  Callers with empty lists had
+    their ``self`` empty and were never meaningfully processed.
 
-    This is the shared definition of "analysed" used by both the bench
-    runner (for DDA scoring) and the diagnosis tool (for DDA filtering).
+    This is the shared definition used by both the bench runner (DDA
+    scoring) and the diagnosis tool (DDA filtering).
     """
-    analysed_raw: Set[str] = set()
-    for caller, callees in raw_graph.items():
-        if caller.startswith("<"):
-            continue
-        for callee in callees:
-            if not callee.startswith("<"):
-                analysed_raw.add(caller)
-                break
-
-    analysed: Set[str] = set()
-    for c in analysed_raw:
-        nc = normalize_callgraph_name(c, project_name, entry_file=entry_file)
-        if not nc.startswith("<"):
-            analysed.add(nc)
-    return analysed
+    return {c for c, callees in normalized_graph.items() if callees}
 
 
 def _filter_gt_dda(
     gt_graph: Dict[str, List[str]],
-    raw_graph: Dict[str, Iterable[str]],
-    project_name: str,
-    entry_file: Optional[Path],
+    normalized_graph: Dict[str, Iterable[str]],
+    strict: bool = False,
 ) -> Dict[str, List[str]]:
-    """Filter GT to only edges whose caller was truly analysed."""
-    analysed = _compute_analysed_callers(raw_graph, project_name, entry_file)
-    return {c: callees for c, callees in gt_graph.items() if c in analysed}
+    """Filter GT to only edges whose caller was truly analysed.
+
+    In *strict* mode we additionally remove edges whose *callee* is not
+    present anywhere in PyFlowʼs output (targeting EXTERNAL_NOT_AVAILABLE
+    and MODULE_NOT_LOADED).
+    """
+    analysed = _compute_analysed_callers(normalized_graph)
+    filtered = {c: callees for c, callees in gt_graph.items() if c in analysed}
+
+    if strict:
+        known: Set[str] = set(normalized_graph.keys())
+        for callees in normalized_graph.values():
+            known.update(callees)
+        filtered = {
+            c: [t for t in callees if t in known]
+            for c, callees in filtered.items()
+        }
+        filtered = {c: callees for c, callees in filtered.items() if callees}
+
+    return filtered
 
 
 def _score(predicted: Set[Edge], expected: Set[Edge]) -> Tuple[float, float, int, int, int]:
@@ -537,7 +559,7 @@ def _score(predicted: Set[Edge], expected: Set[Edge]) -> Tuple[float, float, int
 
 def _dump_missing_edges(
     predicted_edges: Set[Edge],
-    raw_graph: Dict[str, Iterable[str]],
+    normalized_graph: Dict[str, Iterable[str]],
     project: Project,
     engine_name: str,
     dump_dir: Path,
@@ -546,9 +568,7 @@ def _dump_missing_edges(
 ) -> None:
     gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
     if not whole_program:
-        gt_graph = _filter_gt_dda(
-            gt_graph, raw_graph, project.name, project.entry_file,
-        )
+        gt_graph = _filter_gt_dda(gt_graph, normalized_graph)
     gt_edges = _adjacency_to_edges(gt_graph)
     missing = gt_edges - predicted_edges
     if not missing:
@@ -592,16 +612,20 @@ def _run_constraint_engine(
             predicted_edges = _adjacency_to_edges(normalized_graph)
 
         gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
+        # Coverage
+        all_gt_callers = set(gt_graph.keys())
+        analysed = _compute_analysed_callers(normalized_graph)
+        covered = len(analysed & all_gt_callers)
+        coverage = covered / len(all_gt_callers) if all_gt_callers else 1.0
+
         if not whole_program:
-            gt_graph = _filter_gt_dda(
-                gt_graph, raw_graph, project.name, project.entry_file,
-            )
+            gt_graph = _filter_gt_dda(gt_graph, normalized_graph)
         precision, recall, tp, fp, fn = _score(
             predicted_edges, _adjacency_to_edges(gt_graph)
         )
         if dump_missing:
             _dump_missing_edges(
-                predicted_edges, raw_graph, project, "constraint",
+                predicted_edges, normalized_graph, project, "constraint",
                 dump_missing, normalize_gt=normalize_gt,
                 whole_program=whole_program,
             )
@@ -611,6 +635,7 @@ def _run_constraint_engine(
             runtime_ms=timed_graph.runtime_ms,
             precision=precision,
             recall=recall,
+            coverage=coverage,
             tp=tp,
             fp=fp,
             fn=fn,
@@ -667,15 +692,13 @@ def _run_pycg_engine(
 
             gt_graph = _normalize_gt(project.ground_truth) if normalize_gt else project.ground_truth
             if not whole_program:
-                gt_graph = _filter_gt_dda(
-                    gt_graph, raw_graph, project.name, project.entry_file,
-                )
+                gt_graph = _filter_gt_dda(gt_graph, normalized_graph)
             precision, recall, tp, fp, fn = _score(
                 predicted_edges, _adjacency_to_edges(gt_graph)
             )
             if dump_missing:
                 _dump_missing_edges(
-                    predicted_edges, raw_graph, project, "pycg",
+                    predicted_edges, normalized_graph, project, "pycg",
                     dump_missing, normalize_gt=normalize_gt,
                     whole_program=whole_program,
                 )
@@ -685,6 +708,7 @@ def _run_pycg_engine(
                 runtime_ms=statistics.mean(runtimes),
                 precision=precision,
                 recall=recall,
+                coverage=float("nan"),  # pycg = GT source
                 tp=tp,
                 fp=fp,
                 fn=fn,
@@ -789,11 +813,12 @@ def _aggregate(
             "count": float(len(rows)),
             "precision": statistics.mean(item.precision for item in rows),
             "recall": statistics.mean(item.recall for item in rows),
-            "runtime_ms": (
-                statistics.mean(item.runtime_ms for item in rows)
-                if all(not math.isnan(item.runtime_ms) for item in rows)
-                else float("nan")
-            ),
+            "coverage": statistics.mean(item.coverage for item in rows) if all(
+                item.coverage == item.coverage for item in rows
+            ) else float("nan"),
+            "runtime_ms": statistics.mean(item.runtime_ms for item in rows) if all(
+                not math.isnan(item.runtime_ms) for item in rows
+            ) else float("nan"),
         }
     return summary
 
@@ -816,20 +841,18 @@ def _print_summary(
 
     header = (
         f"{'Engine':<{engine_w}}{'Project':<{proj_w}}"
-        f"{'Precision':>10}{'Recall':>8}{'Runtime(ms)':>13}"
+        f"{'Precision':>10}{'Recall':>8}{'Cov':>7}{'Runtime(ms)':>13}"
     )
     print(header)
     print("-" * 80)
 
     for (engine, project), values in sorted(summary.items()):
-        rt_str = (
-            f"{values['runtime_ms']:.2f}"
-            if values["runtime_ms"] == values["runtime_ms"]
-            else "N/A"
-        )
+        rt_str = f"{values['runtime_ms']:.2f}" if values['runtime_ms'] == values['runtime_ms'] else "N/A"
+        cov_str = f"{values['coverage']:>7.3f}" if values['coverage'] == values['coverage'] else "      -"
         print(
             f"{engine:<{engine_w}}{project:<{proj_w}}"
             f"{values['precision']:>10.3f}{values['recall']:>8.3f}"
+            f"{cov_str}"
             f"{rt_str:>13}"
         )
 
@@ -842,10 +865,7 @@ def _print_summary(
         engine_aggregates.setdefault(engine, []).append(values)
 
     eng_w = max(len(e) for e in engine_aggregates) + 1
-    avg_header = (
-        f"{'Engine':<{eng_w}}{'Projects':>10}{'Avg Prec':>10}"
-        f"{'Avg Rec':>9}{'Avg RT(ms)':>12}"
-    )
+    avg_header = f"{'Engine':<{eng_w}}{'Projects':>10}{'Avg Prec':>10}{'Avg Rec':>9}{'Avg Cov':>9}{'Avg RT(ms)':>12}"
     print(avg_header)
     print("-" * 80)
 
@@ -854,10 +874,13 @@ def _print_summary(
         n = float(len(items))
         avg_p = statistics.mean(v["precision"] for v in items)
         avg_r = statistics.mean(v["recall"] for v in items)
+        covs = [v["coverage"] for v in items if v["coverage"] == v["coverage"]]
+        avg_c = statistics.mean(covs) if covs else float("nan")
+        cov_str = f"{avg_c:>9.3f}" if avg_c == avg_c else "        -"
         rts = [v["runtime_ms"] for v in items if v["runtime_ms"] == v["runtime_ms"]]
         avg_rt = statistics.mean(rts) if rts else float("nan")
         rt_str = f"{avg_rt:.2f}" if avg_rt == avg_rt else "N/A"
-        print(f"{engine:<{eng_w}}{int(n):>10}{avg_p:>10.3f}{avg_r:>9.3f}{rt_str:>12}")
+        print(f"{engine:<{eng_w}}{int(n):>10}{avg_p:>10.3f}{avg_r:>9.3f}{cov_str}{rt_str:>12}")
 
     _print_deltas(summary)
     _print_errors(results)

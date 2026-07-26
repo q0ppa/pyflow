@@ -129,9 +129,15 @@ class MissingEdgeDiagnoser:
             self._cg_edges.add((nc, nt))
 
         # Use the shared definition of "analysed" from the bench module.
-        self._reachable_callers = _compute_analysed_callers(
-            cg.get(), project_name, entry_file,
-        )
+        raw_graph = cg.get()
+        minimal_norm: Dict[str, List[str]] = {}
+        for caller, callees in raw_graph.items():
+            nc = self._norm(caller)
+            if nc.startswith("<"):
+                continue
+            kept = [self._norm(c) for c in callees if not c.startswith("<")]
+            minimal_norm[nc] = kept
+        self._reachable_callers = _compute_analysed_callers(minimal_norm)
 
         # Which callers have dynamic summaries (normalized)
         for caller, callees in cg.get().items():
